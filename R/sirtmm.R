@@ -1,6 +1,6 @@
 sirtmm <- function(data,
                    k = NULL,
-                   itemtype = "SIRM-MMe",
+                   itemtype = "SIRT-MMe",
                    quadpts = 15,
                    tol = 0.0001,
                    max_emsteps = 10,
@@ -19,9 +19,12 @@ sirtmm <- function(data,
     k <- max(data)
     if (verbose) message("Using the maximum of the response matrix: ", k)
   }
+  
+  extended <- ifelse(itemtype == "SIRT-MMe", TRUE, FALSE)
 
-  res <- EMSteps(data, k, points, weights, lambda1, lamnda2, ngs, max_emsteps, max_nriter, verbose)
-  se <- SE(data, res[["b"]],  res[["a"]], res[["c"]], res[["g"]], k, points, weights)
+  res <- EMSteps(data, k, points, weights, lambda1, lamnda2, ngs, max_emsteps, max_nriter, verbose, extended)
+  cs <- if (itemtype == "SIRT-MMe") res[["c"]] else rep(1/k, ncol(data))
+  se <- SE(data, res[["b"]],  res[["a"]], cs, res[["g"]], k, points, weights, extended)
   return(list(
     itempar = as.data.frame(res),
     se = as.data.frame(se)
