@@ -10,3 +10,4 @@ License: GPL (>= 2)
 Imports: Rcpp (>= 1.0.8),
          fastGHQuad
 LinkingTo: Rcpp, RcppArmadillo 
+RoxygenNote: 7.2.3.9000

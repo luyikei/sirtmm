@@ -1,3 +1,6 @@
+//' @useDynLib sirtmm, .registration = TRUE
+//' @importFrom Rcpp evalCpp
+
 // [[Rcpp::plugins("cpp11")]]
 // [[Rcpp::depends(RcppArmadillo)]]
 #include <RcppArmadillo.h>
@@ -34,7 +37,7 @@ void z_Hess(arma::mat& zH, unsigned int y, double theta, double b, double a, con
 }
 
 
-std::pair<arma::vec, arma::mat> mam_deriv(int y, double theta, double b, double a, double c, const arma::rowvec& g , int K, bool extended) {
+std::pair<arma::vec, arma::mat> item_deriv(int y, double theta, double b, double a, double c, const arma::rowvec& g , int K, bool extended) {
   arma::vec d;
   arma::mat V;
   arma::vec zd1;
@@ -85,8 +88,11 @@ std::pair<arma::vec, arma::mat> mam_deriv(int y, double theta, double b, double 
   return std::make_pair(d, V);
 }
 
+//' Item Response Function
+//'
+//' @export
 // [[Rcpp::export]]
-double mam_single(unsigned int y, double theta, double b, double a, double c, const arma::rowvec& g, int K) {
+double item_single(unsigned int y, double theta, double b, double a, double c, const arma::rowvec& g, int K) {
   double num = (c + exp( Z(y, theta, b, a, g) )) ;
   double den = 1;
   for (unsigned int k = 1; k <= y; ++k) {
@@ -98,18 +104,18 @@ double mam_single(unsigned int y, double theta, double b, double a, double c, co
 }
 
 // [[Rcpp::export]]
-arma::vec mam_d(int y, double theta, double b, double a, double c, const arma::rowvec& g , int K, bool extended) {
-  return mam_deriv(y, theta, b, a, c, g, K, extended).first;
+arma::vec item_d(int y, double theta, double b, double a, double c, const arma::rowvec& g , int K, bool extended) {
+  return item_deriv(y, theta, b, a, c, g, K, extended).first;
   }
 
 // [[Rcpp::export]]
-arma::mat mam_Hess(int y, double theta, double b, double a, double c, const arma::rowvec& g, int K, bool extended) {
-  return mam_deriv(y, theta, b, a, c, g, K, extended).second;
+arma::mat item_Hess(int y, double theta, double b, double a, double c, const arma::rowvec& g, int K, bool extended) {
+  return item_deriv(y, theta, b, a, c, g, K, extended).second;
 }
 
 
 // [[Rcpp::export]]
-double mam_vec(const arma::rowvec& ys, double theta,
+double item_vec(const arma::rowvec& ys, double theta,
               const arma::vec& bs, const arma::vec& as, const arma::vec& cs, const arma::mat& gs, int K) {
   double s = 1;
   for (unsigned int i = 0; i < ys.n_elem; ++i) {
@@ -141,7 +147,7 @@ List EStep(const NumericMatrix& X, const NumericVector& bs, const NumericVector&
     tmp2.fill(0);
     double den = 0;
     for (int f = 0; f < PN; ++f) {
-      double l = mam_vec(X(i, _), points[f], bs , as, cs, gMat, K);
+      double l = item_vec(X(i, _), points[f], bs , as, cs, gMat, K);
 
       den += l * weights[f];
       for (int h = 0; h < M; ++h) {
@@ -162,8 +168,8 @@ List EStep(const NumericMatrix& X, const NumericVector& bs, const NumericVector&
 
 // [[Rcpp::export]]
 List fisherScoring(const NumericVector& bs, const NumericVector& as, const NumericVector& cs, const NumericMatrix& gs, int K ,
-                  const NumericVector& rhat, const NumericVector& nhat, const NumericVector& points,
-                  double lambda, double lambda2, int maxIter = 50, bool extended = true) {
+                  const NumericVector& rhat, const NumericVector& nhat, const NumericVector& points, bool extended, bool nog,
+                  double lambda, double lambda2, int maxIter = 50) {
   int M = bs.length();
   int PN = points.length();
   NumericVector newB(M);
@@ -193,11 +199,11 @@ List fisherScoring(const NumericVector& bs, const NumericVector& as, const Numer
       V.zeros(size, size);
       for (int f = 0; f < PN; ++f) {
         for (int k = 0; k < K; ++k) {
-          auto deriv = mam_deriv(k + 1, points[f], v(0), v(1), extended ? v(2 + gMat.n_cols) : 1.0 / K, gRow, K, extended);
+          auto deriv = item_deriv(k + 1, points[f], v(0), v(1), extended ? v(2 + gMat.n_cols) : 1.0 / K, gRow, K, extended);
           auto d = deriv.first;
           auto H = deriv.second;
           t += rhat[k + f * K + j * K * PN] * d;
-          V += -nhat[f] * mam_single(k + 1, points[f], v(0), v(1), extended ? v(2 + gMat.n_cols) : 1.0 / K, gRow, K) * H;
+          V += -nhat[f] * item_single(k + 1, points[f], v(0), v(1), extended ? v(2 + gMat.n_cols) : 1.0 / K, gRow, K) * H;
         }
       }
 
@@ -207,9 +213,11 @@ List fisherScoring(const NumericVector& bs, const NumericVector& as, const Numer
       }
 
       // Regularization
-      for (unsigned int k = 0; k < gMat.n_cols; ++k) {
-        t(k + 2) += - lambda * v(k + 2);
-        V(k + 2, k + 2) += lambda;
+      if (!nog) {
+        for (unsigned int k = 0; k < gMat.n_cols; ++k) {
+          t(k + 2) += - lambda * v(k + 2);
+          V(k + 2, k + 2) += lambda;
+        }
       }
 
       if (extended) {
@@ -233,6 +241,9 @@ List fisherScoring(const NumericVector& bs, const NumericVector& as, const Numer
       }*/
       auto x2 = arma::clamp(x, -0.3, 0.3); // Avoid moving too much
       v = v + x2;
+      if (nog) {
+        v(2) = 0;
+      }
     }
     newB(j) = v(0);
     newA(j) = v(1);
@@ -254,7 +265,7 @@ List fisherScoring(const NumericVector& bs, const NumericVector& as, const Numer
 
 // [[Rcpp::export]]
 List EMSteps(const NumericMatrix& X, int K , const NumericVector& points, const NumericVector& weights,
-              double lambda, double lambda2, double ngs, int maxEMIter = 10, int maxNRIter = 50, bool verbose = false, bool exntended = true) {
+              double lambda, double lambda2, int ngs, int maxEMIter = 10, int maxNRIter = 50, bool verbose = false, bool exntended = true) {
   auto M = X.cols();
   NumericVector bs(M);
   bs.fill(0);
@@ -262,6 +273,13 @@ List EMSteps(const NumericMatrix& X, int K , const NumericVector& points, const 
   as.fill(0.1);
   NumericVector cs(M);
   cs.fill(1.0 / K);
+
+  // if no g parameter. Still we provide the g matrix for simplicity.
+  bool nog = false;
+  if (ngs == 0) {
+    nog = true;
+    ngs = 1;
+  }
   NumericMatrix gs(M, ngs);
   gs.fill(0);
 
@@ -270,7 +288,7 @@ List EMSteps(const NumericMatrix& X, int K , const NumericVector& points, const 
     auto rhat = E["rhat"];
     auto nhat = E["nhat"];
 
-    auto ret = fisherScoring(bs, as, cs, gs, K, rhat, nhat, points, lambda, lambda2, maxNRIter, exntended);
+    auto ret = fisherScoring(bs, as, cs, gs, K, rhat, nhat, points, exntended, nog, lambda, lambda2, maxNRIter);
     bs = ret["b"];
     as = ret["a"];
     if (exntended) cs = ret["c"];
@@ -297,7 +315,7 @@ double LogLikliTotal(const NumericMatrix& X, const NumericVector& bs, const Nume
   for (int j = 0; j < X.cols(); ++j) {
     for (int f = 0; f < PN; ++f) {
       for (int k = 0; k < K; ++k) {
-        ll += rhat[k + f * K + j * K * PN] * log(mam_single(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), K));
+        ll += rhat[k + f * K + j * K * PN] * log(item_single(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), K));
       }
     }
   }
@@ -312,7 +330,7 @@ double LogLikli(double j, double B, double A, arma::rowvec gs, int K,
   double t = 0;
   for (int f = 0; f < PN; ++f) {
     for (int k = 0; k < K; ++k) {
-      t += rhat[k + f * K + j * K * PN] * log(mam_single(k + 1, points[f], B, A, gs, K));
+      t += rhat[k + f * K + j * K * PN] * log(item_single(k + 1, points[f], B, A, gs, K));
     }
   }
   return t;
@@ -326,7 +344,7 @@ arma::vec LogLikliGrad(double j, double B, double A, arma::rowvec gs, int K,
   t.zeros(2 + gs.n_elem);
   for (int f = 0; f < PN; ++f) {
     for (int k = 0; k < K; ++k) {
-      auto d = mam_d(k + 1, points[f], B, A, gs, K);
+      auto d = item_d(k + 1, points[f], B, A, gs, K);
       t += rhat[k + f * K + j * K * PN] * d;
     }
   }
@@ -336,7 +354,7 @@ arma::vec LogLikliGrad(double j, double B, double A, arma::rowvec gs, int K,
 
 // [[Rcpp::export]]
 List SE(const NumericMatrix& X, NumericVector bs, NumericVector as, NumericVector cs,
-        const NumericMatrix& gs, int K, NumericVector points, const NumericVector& weights, bool extended) {
+        const NumericMatrix& gs, int K, NumericVector points, const NumericVector& weights, bool extended, bool nog) {
 
   int M = bs.length();
   int PN = points.length();
@@ -357,30 +375,49 @@ List SE(const NumericMatrix& X, NumericVector bs, NumericVector as, NumericVecto
     V.zeros(size, size);
     for (int f = 0; f < PN; ++f) {
       for (int k = 0; k < K; ++k) {
-        auto H = mam_Hess(k + 1, points[f], bs[j], as[j], cs[j], gRow, K, extended);
-        V += -nhat(f) * mam_single(k + 1, points[f], bs[j], as[j], cs[j], gRow, K) * H;
+        auto H = item_Hess(k + 1, points[f], bs[j], as[j], cs[j], gRow, K, extended);
+        V += -nhat(f) * item_single(k + 1, points[f], bs[j], as[j], cs[j], gRow, K) * H;
       }
     }
     //Rcout << "Determinant of Fisher Information Matrix is " << arma::det(V) << std::endl;
     arma::mat cov = arma::pinv(V);
+    if (nog) {
+      cov.shed_row(2);
+      cov.shed_col(2);
+    }
     arma::vec dg = cov.diag();
     arma::vec sd = sqrt(dg);
     sdB(j) = sd(0);
     sdA(j) = sd(1);
-    if (extended) sdC(j) = sd(gMat.n_cols + 2);
-    for (unsigned int k = 0; k < gMat.n_cols; ++k) {
-      sdG(j, k) = sd(k + 2);
+    if (extended) sdC(j) = sd(cov.n_cols - 1);
+    if (!nog) {
+      for (unsigned int k = 0; k < gMat.n_cols; ++k) {
+        sdG(j, k) = sd(k + 2);
+      }
     }
   }
-  if (extended)
-    return List::create(_["b"] = sdB,
-                              _["a"] = sdA,
-                              _["c"] = sdC,
-                              _["g"] = sdG);
-  else
-    return List::create(_["b"] = sdB,
-                              _["a"] = sdA,
-                              _["g"] = sdG);
+
+  if (extended) {
+    if (nog) {
+      return List::create(_["b"] = sdB,
+                                _["a"] = sdA,
+                                _["c"] = sdC);
+    } else {
+      return List::create(_["b"] = sdB,
+                                _["a"] = sdA,
+                                _["c"] = sdC,
+                                _["g"] = sdG);
+    }
+  } else {
+    if (nog) {
+      return List::create(_["b"] = sdB,
+                                _["a"] = sdA);
+    } else {
+      return List::create(_["b"] = sdB,
+                                _["a"] = sdA,
+                                _["g"] = sdG);
+    }
+  }
 }
 
 
@@ -395,7 +432,7 @@ NumericVector eap_theta(NumericMatrix X, NumericVector bs, NumericVector as, Num
     double den = 0;
     double num = 0;
     for (int f = 0; f < PN; ++f) {
-      double l = mam_vec(X(i, _), points[f], bs , as, cs, gMat, K);
+      double l = item_vec(X(i, _), points[f], bs , as, cs, gMat, K);
       num += points[f] * l * weights[f];
       den += l * weights[f];
     }
@@ -435,7 +472,7 @@ NumericVector mle_theta(NumericMatrix X, NumericVector bs, NumericVector as, con
             if (y == X(i,j))
               grad -= a*B;
           }
-          fi += - mam_single(y, theta, b, a, g, K) * d2;
+          fi += - item_single(y, theta, b, a, g, K) * d2;
         }
       }
       double x = grad / fi;
@@ -459,7 +496,7 @@ NumericVector PSD(NumericMatrix X, NumericVector thetas, NumericVector bs, Numer
     double den = 0;
     double num = 0;
     for (int f = 0; f < PN; ++f) {
-      double l = mam_vec(X(i, _), points[f], bs , as, cs, gMat, K);
+      double l = item_vec(X(i, _), points[f], bs , as, cs, gMat, K);
       num += (points[f] - thetas(i)) * (points[f] - thetas(i)) * l * weights[f];
       den += l * weights[f];
     }
@@ -562,7 +599,7 @@ NumericVector FI(NumericVector thetas, NumericVector bs, NumericVector as, Numer
           double B = e / ((1.0 - c) * (K - k) / (K - 1.0) + c + e);
           d2 -= a * a * B * (1 - B);
         }
-        tempFI += - mam_single(y, theta, b, a, c, g, K) * d2;
+        tempFI += - item_single(y, theta, b, a, c, g, K) * d2;
       }
       fi(i) += tempFI;
     }
