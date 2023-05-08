@@ -2,6 +2,7 @@
 
 S3method(anova,sirtmmModel)
 export(item_single)
+export(simsirt)
 export(sirtmm)
 importFrom(Rcpp,evalCpp)
 useDynLib(sirtmm, .registration = TRUE)
