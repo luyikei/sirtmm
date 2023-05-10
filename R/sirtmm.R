@@ -1,3 +1,11 @@
+pad_mat <- function(mat, M) {
+  if (!length(mat)) {
+    nmat <- matrix(0, nrow = M, ncol = 1)
+  } else {
+    nmat <- cbind(0, mat)
+  }
+  nmat
+}
 
 #' Estimation
 #'
@@ -16,6 +24,7 @@ sirtmm <- function(data,
                    lambda1 = 1,
                    lambda2 = 50,
                    ngs = 1,
+                   nds = 0,
                    verbose = FALSE) {
   rule <- fastGHQuad::gaussHermiteData(quadpts)
   points <- rule$x
@@ -36,18 +45,13 @@ sirtmm <- function(data,
   }
 
   extended <- ifelse(itemtype == "SIRT-MMe", TRUE, FALSE)
-  nog <- ngs == 0
 
-  res <- EMSteps(data, k, points, weights, lambda1, lambda2, ngs, max_emsteps, max_nriter, verbose, extended)
+  res <- EMSteps(data, k, points, weights, lambda1, lambda2, ngs, nds, max_emsteps, max_nriter, verbose, extended)
   if (itemtype == "SIRT-MM") res[["c"]] <- rep(1 / k, ncol(data))
-  se <- SE(data, res[["b"]], res[["a"]], res[["c"]], res[["g"]], k, points, weights, extended)
+  se <- SE(data, res[["b"]], res[["a"]], res[["c"]], res[["g"]], res[["d"]], k, points, weights, extended)
 
-  # if (ngs == 0) {
-  #   res[["g"]] = NULL
-  #   se[["g"]] = NULL
-  # }
-  print(res[["g"]])
   res[["g"]] <- res[["g"]][, -1]
+  res[["d"]] <- res[["d"]][, -1]
 
   data[data == -999] <- NA
 
@@ -70,6 +74,7 @@ sirtmm <- function(data,
     ),
     itempar = as.data.frame(res),
     g.mat = res[["g"]],
+    d.mat = res[["d"]],
     se = as.data.frame(se)
   )
   class(mod) <- "sirtmmModel"
@@ -94,11 +99,11 @@ anova.sirtmmModel <- function(...) {
   models <- list(...)
   for (mod in models) {
     eret <- EStep(
-      mod$data, mod$itempar$b, mod$itempar$a, mod$itempar$c, mod$g.mat, mod$options$k,
+      mod$data, mod$itempar$b, mod$itempar$a, mod$itempar$c, mod$g.mat, mod$d.mat, mod$options$k,
       mod$quadpts$points, mod$quadpts$weights
     )
     logLik <- LogLikliTotal(
-      mod$data, mod$itempar$b, mod$itempar$a, mod$itempar$c, mod$g.mat, mod$options$k,
+      mod$data, mod$itempar$b, mod$itempar$a, mod$itempar$c, mod$g.mat, mod$d.mat, mod$options$k,
       eret[["rhat"]], mod$quadpts$points
     )
     npar <- dim(mod$itempar)[1] * dim(mod$itempar)[2]
@@ -115,10 +120,10 @@ anova.sirtmmModel <- function(...) {
 }
 
 # retuns prob for all possible responses
-item_single_all <- function(theta, b, a, c, g, K) {
+item_single_all <- function(theta, b, a, c, g, d, K) {
   ret <- rep(0, K)
   for (k in 1:K) {
-    ret[k] <- item_single(k, theta, b, a, c, g, K)
+    ret[k] <- item_single(k, theta, b, a, c, g, d, K)
   }
   ret
 }
@@ -135,18 +140,21 @@ item_single_all <- function(theta, b, a, c, g, K) {
 #' @param cdist A function returns a M x 1 vector of c parameter
 #' @param gdist A function returns a M x V matrix of g parameter where V is the number of effective g parameters.
 #' @export
-simsirt <- function(N, M, K, theta, b, a, c, g) {
+simsirt <- function(N, M, K, theta, b, a, c, g, d) {
   X <- matrix(0, nrow = N, ncol = M)
+  gp <- pad_mat(g, M)
+  dp <- pad_mat(d, M)
   for (i in 1:N) {
     for (j in 1:M) {
-      probs <- item_single_all(theta[i], b[j], a[j], c[j], cbind(0, g)[j, ], K)
+      probs <- item_single_all(theta[i], b[j], a[j], c[j], gp[j, ], dp[j, ], K)
       X[i, j] <- sample(K, 1, prob = probs, replace = TRUE)
     }
   }
   return(list(
     data = X,
     theta = theta,
-    itempar = data.frame(b = b, a = a, c = c, g = g),
-    g.mat = g
+    itempar = data.frame(b = b, a = a, c = c, g = g, d = d),
+    g.mat = g,
+    d.mat = d
   ))
 }
