@@ -7,6 +7,14 @@ pad_mat <- function(mat, M) {
   nmat
 }
 
+item_single_all <- function(theta, b, a, c, g, d, K, MK) {
+  ret <- rep(0, K)
+  for (k in 1:K) {
+    ret[k] <- item_single(k, theta, b, a, c, g, d, K, MK)
+  }
+  ret
+}
+
 #' Estimation
 #'
 #' Test
@@ -16,16 +24,19 @@ pad_mat <- function(mat, M) {
 #' @export
 sirtmm <- function(data,
                    k = NULL,
+                   mk = -1,
                    itemtype = "SIRT-MMe",
                    quadpts = 15,
                    tol = 0.0001,
                    max_emsteps = 10,
                    max_nriter = 50,
                    lambda1 = 1,
-                   lambda2 = 50,
+                   lambda2 = 1,
+                   lambda3 = 50,
                    ngs = 1,
                    nds = 0,
-                   verbose = FALSE) {
+                   verbose = FALSE,
+                   lasso = FALSE) {
   rule <- fastGHQuad::gaussHermiteData(quadpts)
   points <- rule$x
   points <- points * sqrt(2)
@@ -46,12 +57,16 @@ sirtmm <- function(data,
 
   extended <- ifelse(itemtype == "SIRT-MMe", TRUE, FALSE)
 
-  res <- EMSteps(data, k, points, weights, lambda1, lambda2, ngs, nds, max_emsteps, max_nriter, verbose, extended)
+  res <- EMSteps(data, k, mk, points, weights, lambda1, lambda2, lambda3, ngs, nds, max_emsteps, max_nriter, verbose, extended, lasso)
   if (itemtype == "SIRT-MM") res[["c"]] <- rep(1 / k, ncol(data))
-  se <- SE(data, res[["b"]], res[["a"]], res[["c"]], res[["g"]], res[["d"]], k, points, weights, extended)
+  se <- SE(data, res[["b"]], res[["a"]], res[["c"]], res[["g"]], res[["d"]], k, mk, points, weights, extended)
 
+  conv <- res[["conv"]]
+  res[["conv"]] <- NULL
   res[["g"]] <- res[["g"]][, -1]
   res[["d"]] <- res[["d"]][, -1]
+  se[["g"]] <- se[["g"]][, -1]
+  se[["d"]] <- se[["d"]][, -1]
 
   data[data == -999] <- NA
 
@@ -59,6 +74,7 @@ sirtmm <- function(data,
     data = data,
     options = list(
       k = k,
+      mk = mk,
       itemtype = itemtype,
       quadpts = quadpts,
       tol = tol,
@@ -66,16 +82,20 @@ sirtmm <- function(data,
       max_nriter = max_nriter,
       lambda1 = lambda1,
       lambda2 = lambda2,
-      ngs = ngs
+      ngs = ngs,
+      nds = nds
     ),
     quadpts = list(
       weights = weights,
       points = points
     ),
+    conv = conv,
     itempar = as.data.frame(res),
-    g.mat = res[["g"]],
-    d.mat = res[["d"]],
-    se = as.data.frame(se)
+    g.mat = as.matrix(res[["g"]]),
+    d.mat = as.matrix(res[["d"]]),
+    se = as.data.frame(se),
+    se.g.mat = (if (!is.null(se[["g"]])) as.matrix(se[["g"]]) else NULL),
+    se.d.mat = (if (!is.null(se[["d"]])) as.matrix(se[["d"]]) else NULL)
   )
   class(mod) <- "sirtmmModel"
   return(mod)
@@ -86,7 +106,6 @@ sirtmm <- function(data,
 #' Test
 #'
 #' @param ... SIRT-MM models.
-#' @export
 #' @examples
 #'
 #' mod1 <- sirtmm(X, k = K, itemtype = "SIRT-MM", ngs = 0, lambda1 = 1, lambda2 = 50)
@@ -94,38 +113,80 @@ sirtmm <- function(data,
 #' mod3 <- sirtmm(X, k = K, itemtype = "SIRT-MMe", ngs = 0, lambda1 = 1, lambda2 = 50)
 #' mod4 <- sirtmm(X, k = K, itemtype = "SIRT-MMe", ngs = 1, lambda1 = 1, lambda2 = 50)
 #' anova(mod1, mod2, mod3, mod4)
+#'
+#' @export
 anova.sirtmmModel <- function(...) {
   ret <- data.frame()
   models <- list(...)
   for (mod in models) {
+    M <- nrow(mod$itempar)
     eret <- EStep(
-      mod$data, mod$itempar$b, mod$itempar$a, mod$itempar$c, mod$g.mat, mod$d.mat, mod$options$k,
+      mod$data, mod$itempar$b, mod$itempar$a, mod$itempar$c, pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk,
       mod$quadpts$points, mod$quadpts$weights
     )
     logLik <- LogLikliTotal(
-      mod$data, mod$itempar$b, mod$itempar$a, mod$itempar$c, mod$g.mat, mod$d.mat, mod$options$k,
+      mod$data, mod$itempar$b, mod$itempar$a, mod$itempar$c, pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk,
       eret[["rhat"]], mod$quadpts$points
     )
     npar <- dim(mod$itempar)[1] * dim(mod$itempar)[2]
-    if (mod$options$itemtype != "SIRT-MMe") npar <- npar - dim(mod$itempar)[1]
-    if (mod$options$ngs == 0) npar <- npar - dim(mod$itempar)[1]
+    if (mod$options$itemtype != "SIRT-MMe") npar <- npar - dim(mod$itempar)[1] # c is not estimated
     ret <- rbind(ret, data.frame(
       AIC = c(2 * npar - 2 * logLik),
-      BIC = c(npar * log(dim(mod$itempar)[1]) - 2 * logLik),
+      BIC = c(npar * log(nrow(mod$itempar)) - 2 * logLik),
       logLik = c(logLik),
-      napr = npar
+      npar = npar
     ))
   }
   return(ret)
 }
 
-# retuns prob for all possible responses
-item_single_all <- function(theta, b, a, c, g, d, K) {
-  ret <- rep(0, K)
-  for (k in 1:K) {
-    ret[k] <- item_single(k, theta, b, a, c, g, d, K)
+#' Person Estimation
+#'
+#' Person parameters
+#'
+#' @param mod The reponse matrix
+#' @param data data
+#' @export
+estimate <- function(mod, data = NULL) {
+  if (is.null(data)) {
+    data <- mod$data
   }
-  ret
+
+  rule <- fastGHQuad::gaussHermiteData(61)
+  points <- rule$x
+  points <- points * sqrt(2)
+  weights <- rule$w
+  weights <- weights / sqrt(pi)
+  
+  M <- nrow(mod$itempar)
+  thetas.est <- eap_theta(
+    data, mod$itempar$b, mod$itempar$a, mod$itempar$c,
+    pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk, points, weights
+  )
+  theta.fi <- FI(
+    thetas.est, mod$itempar$b, mod$itempar$a, mod$itempar$c,
+    pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk
+  )
+  se.theta <- 1 / sqrt(theta.fi)
+  return(list(
+    thetas = thetas.est,
+    fi = theta.fi,
+    se = se.theta
+  ))
+}
+
+
+#' scoring using a scheme
+#'
+#' scoring using a scheme
+#'
+#' @param X The reponse matrix
+#' @param scheme scoring scheme
+#' @export
+score_scheme <- function(X, scheme) {
+  return(
+    ScoreScheme(X, scheme)
+  )
 }
 
 #' Simulate SIRT-MM models
@@ -134,20 +195,22 @@ item_single_all <- function(theta, b, a, c, g, d, K) {
 #'
 #' @param N number of subjects
 #' @param M number of items
-#' @param thetadist A function returns a M x 1 vector of theta
-#' @param bdist A function returns a M x 1 vector of b parameter
-#' @param adist A function returns a M x 1 vector of a parameter
-#' @param cdist A function returns a M x 1 vector of c parameter
-#' @param gdist A function returns a M x V matrix of g parameter where V is the number of effective g parameters.
+#' @param thetadist A N x 1 vector of theta
+#' @param bdist A M x 1 vector of b parameter
+#' @param adist A M x 1 vector of a parameter
+#' @param cdist A M x 1 vector of c parameter
+#' @param gdist A M x V matrix of g parameter where V is the number of effective g parameters.
+#' @param ddist A M x W matrix of d parameter where W is the number of effective d parameters.
 #' @export
-simsirt <- function(N, M, K, theta, b, a, c, g, d) {
+simsirt <- function(N, M, K, theta, b, a, c, g, d, MK = -1) {
   X <- matrix(0, nrow = N, ncol = M)
+  if (MK == -1) MK <- K
   gp <- pad_mat(g, M)
   dp <- pad_mat(d, M)
   for (i in 1:N) {
     for (j in 1:M) {
-      probs <- item_single_all(theta[i], b[j], a[j], c[j], gp[j, ], dp[j, ], K)
-      X[i, j] <- sample(K, 1, prob = probs, replace = TRUE)
+      probs <- item_single_all(theta[i], b[j], a[j], c[j], gp[j, ], dp[j, ], K, MK)
+      X[i, j] <- sample(MK, 1, prob = probs, replace = TRUE)
     }
   }
   return(list(

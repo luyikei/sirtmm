@@ -29,7 +29,7 @@ double Z(unsigned int y, double theta, double b, double a, const arma::rowvec &g
   return r;
 }
 
-void z_d(arma::mat &zd1, unsigned int y, double theta, double b, double a, const arma::rowvec &g, const arma::rowvec &d, int K)
+void z_d(arma::mat &zd1, unsigned int y, double theta, double b, double a, const arma::rowvec &g, const arma::rowvec &d)
 {
   zd1.fill(0);
   zd1(0) = -a;        // b
@@ -48,7 +48,7 @@ void z_d(arma::mat &zd1, unsigned int y, double theta, double b, double a, const
   }
 }
 
-void z_Hess(arma::mat &zH, unsigned int y, double theta, double b, double a, const arma::rowvec &g, const arma::rowvec &d, int K)
+void z_Hess(arma::mat &zH, unsigned int y, double theta, double b, double a, const arma::rowvec &g, const arma::rowvec &d)
 {
   zH.fill(0);
   zH(1, 0) = -1;
@@ -68,7 +68,7 @@ void z_Hess(arma::mat &zH, unsigned int y, double theta, double b, double a, con
   }
 }
 
-std::pair<arma::vec, arma::mat> item_deriv(int y, double theta, double b, double a, double c, const arma::rowvec &g, const arma::rowvec &dp, int K, bool extended)
+std::pair<arma::vec, arma::mat> item_deriv(int y, double theta, double b, double a, double c, const arma::rowvec &g, const arma::rowvec &dp, int K, int MK, bool extended)
 {
   const int size = extended ? g.n_elem + dp.n_elem + 1 : g.n_elem + dp.n_elem;
   const unsigned int C_IDX = g.n_elem + dp.n_elem;
@@ -82,8 +82,45 @@ std::pair<arma::vec, arma::mat> item_deriv(int y, double theta, double b, double
   d.zeros(size); // In this order: b a g d c
   V.zeros(size, size);
 
-  z_d(zd1, y, theta, b, a, g, dp, K);
-  z_Hess(H, y, theta, b, a, g, dp, K);
+  if (MK == -1)
+    MK = K;
+
+  if (MK < K && MK == y)
+  {
+    if (extended)
+    {
+      d(C_IDX) += (1.0 - y) / (1.0 - c);
+      V(C_IDX, C_IDX) += (1.0 - y) / (1.0 - c) / (1.0 - c);
+    }
+    for (int k = 1; k <= y - 1; ++k)
+    {
+      z_d(zd1, k, theta, b, a, g, dp);
+      z_Hess(H, k, theta, b, a, g, dp);
+      double e = exp(Z(k, theta, b, a, g, dp));
+      double C = ((double)K - 1.0) / ((K - k) * (1.0 - c) + (K - 1.0) * (c + e));
+      double D = e * C;
+      d -= zd1 * D;
+      V -= H * D + (zd1 * zd1.t()) * D * (1.0 - D);
+
+      if (extended)
+      {
+        double Cd = (((double)K - k) * (1.0 - c) + (K - 1.0) * (c + e));
+        double C2 = (-((double)K - k) + (K - 1.0)) / Cd;
+        d(C_IDX) += -C2;
+        V(C_IDX, C_IDX) += C2 * C2;
+        for (unsigned int i = 0; i < C_IDX; ++i)
+        {
+          V(i, C_IDX) += zd1(i) * C2 * (K - 1) * e / Cd;
+          V(C_IDX, i) = V(i, C_IDX);
+        }
+      }
+    }
+
+    return std::make_pair(d, V);
+  }
+
+  z_d(zd1, y, theta, b, a, g, dp);
+  z_Hess(H, y, theta, b, a, g, dp);
 
   double e = exp(Z(y, theta, b, a, g, dp));
   double A = e / (c + e);
@@ -105,8 +142,8 @@ std::pair<arma::vec, arma::mat> item_deriv(int y, double theta, double b, double
     e = exp(Z(k, theta, b, a, g, dp));
     double Cd = ((1.0 - c) * (K - k) / (K - 1.0) + c + e);
     double B = e / Cd;
-    z_d(zd1, k, theta, b, a, g, dp, K);
-    z_Hess(H, k, theta, b, a, g, dp, K);
+    z_d(zd1, k, theta, b, a, g, dp);
+    z_Hess(H, k, theta, b, a, g, dp);
     d -= zd1 * B;
     V -= H * B + zd1 * zd1.t() * B * (1 - B);
 
@@ -130,67 +167,74 @@ std::pair<arma::vec, arma::mat> item_deriv(int y, double theta, double b, double
 //'
 //' @export
 // [[Rcpp::export]]
-double item_single(unsigned int y, double theta, double b, double a, double c, const arma::rowvec &g, const arma::rowvec &d, int K)
+double item_single(unsigned int y, double theta, double b, double a, double c, const arma::rowvec &g, const arma::rowvec &d, int K, unsigned int MK)
 {
-  double num = (c + exp(Z(y, theta, b, a, g, d)));
+  double num = 1;
   double den = 1;
+  if (MK == -1)
+    MK = K;
+
+  // If there is maximum number of attempts.
+  if (MK < K && y == MK)
+  {
+    for (unsigned int k = 1; k < y; ++k)
+    {
+      num *= (K - k) * (1.0 - c);
+      den *= (K - k) * (1.0 - c) + (K - 1) * (c + exp(Z(k, theta, b, a, g, d)));
+    }
+    return num / den;
+  }
+
+  num = (c + exp(Z(y, theta, b, a, g, d)));
   for (unsigned int k = 1; k <= y; ++k)
   {
     if (k > 1)
       num = num * (K - k + 1.0) * (1.0 - c) / (K - 1.0);
-    den = den * ((K - k) * (1 - c) / (K - 1.0) + c + exp(Z(k, theta, b, a, g, d)));
+    den = den * ((K - k) * (1.0 - c) / (K - 1.0) + c + exp(Z(k, theta, b, a, g, d)));
   }
   return num / den;
 }
 
 // [[Rcpp::export]]
-arma::vec item_d(int y, double theta, double b, double a, double c, const arma::rowvec &g, const arma::rowvec &d, int K, bool extended)
+arma::vec item_d(int y, double theta, double b, double a, double c, const arma::rowvec &g, const arma::rowvec &d, int K, int MK, bool extended)
 {
-  return item_deriv(y, theta, b, a, c, g, d, K, extended).first;
+  return item_deriv(y, theta, b, a, c, g, d, K, MK, extended).first;
 }
 
 // [[Rcpp::export]]
-arma::mat item_Hess(int y, double theta, double b, double a, double c, const arma::rowvec &g, const arma::rowvec &d, int K, bool extended)
+arma::mat item_Hess(int y, double theta, double b, double a, double c, const arma::rowvec &g, const arma::rowvec &d, int K, int MK, bool extended)
 {
-  return item_deriv(y, theta, b, a, c, g, d, K, extended).second;
+  return item_deriv(y, theta, b, a, c, g, d, K, MK, extended).second;
 }
 
 // [[Rcpp::export]]
 double item_vec(const arma::rowvec &ys, double theta,
-                const arma::vec &bs, const arma::vec &as, const arma::vec &cs, const arma::mat &gs, const arma::mat &ds, int K)
+                const arma::vec &bs, const arma::vec &as, const arma::vec &cs, const arma::mat &gs, const arma::mat &ds, int K, int MK)
 {
   double s = 1;
   for (unsigned int i = 0; i < ys.n_elem; ++i)
   {
-    double num = 1;
-    double den = 1;
-    for (int k = 1; k <= ys[i]; ++k)
+    if (ys[i] == MISS_VAL)
     {
-      if (ys[i] == MISS_VAL)
-      {
-        continue;
-      }
-
-      if (k > 1)
-        num = num * (K - k + 1.0) * (1.0 - cs(i)) / (K - 1.0);
-      den = den * ((K - k) * (1.0 - cs(i)) / (K - 1) + cs(i) + exp(Z(k, theta, bs(i), as(i), gs.row(i), ds.row(i))));
+      continue;
     }
-    s *= ((cs(i) + exp(Z(ys(i), theta, bs(i), as(i), gs.row(i), ds.row(i)))) * num / den);
+
+    s *= item_single(ys(i), theta, bs(i), as(i), cs(i), gs.row(i), ds.row(i), K, MK);
   }
   return s;
 }
 
 // [[Rcpp::export]]
-List EStep(const NumericMatrix &X, const NumericVector &bs, const NumericVector &as, const NumericVector &cs, const NumericMatrix &gs, const NumericMatrix &ds, int K,
+List EStep(const NumericMatrix &X, const NumericVector &bs, const NumericVector &as, const NumericVector &cs, const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK,
            const NumericVector &points, const NumericVector &weights)
 {
   int M = X.cols();
   int PN = points.length();
-  auto rMat = arma::vec(K * PN * M);
+  auto rMat = arma::vec(MK * PN * M);
   auto nMat = arma::vec(PN);
   auto gMat = Rcpp::as<arma::mat>(gs);
   auto dMat = Rcpp::as<arma::mat>(ds);
-  auto tmp = arma::vec(K * PN * M);
+  auto tmp = arma::vec(MK * PN * M);
   auto tmp2 = arma::vec(PN);
 
   for (int i = 0; i < X.rows(); ++i)
@@ -200,7 +244,7 @@ List EStep(const NumericMatrix &X, const NumericVector &bs, const NumericVector 
     double den = 0;
     for (int f = 0; f < PN; ++f)
     {
-      double l = item_vec(X(i, _), points[f], bs, as, cs, gMat, dMat, K);
+      double l = item_vec(X(i, _), points[f], bs, as, cs, gMat, dMat, K, MK);
 
       den += l * weights[f];
       for (int h = 0; h < M; ++h)
@@ -210,7 +254,7 @@ List EStep(const NumericMatrix &X, const NumericVector &bs, const NumericVector 
           continue;
         }
         int k = X(i, h) - 1;
-        tmp(k + f * K + h * K * PN) += l * weights[f];
+        tmp(k + f * MK + h * MK * PN) += l * weights[f];
       }
       tmp2(f) += l * weights[f];
     }
@@ -220,20 +264,21 @@ List EStep(const NumericMatrix &X, const NumericVector &bs, const NumericVector 
   }
 
   NumericVector rhat = wrap(rMat);
-  rhat.attr("dim") = IntegerVector{K, PN, M};
+  rhat.attr("dim") = IntegerVector{MK, PN, M};
   return List::create(_["rhat"] = rhat, _["nhat"] = nMat);
 }
 
 // [[Rcpp::export]]
-List fisherScoring(const NumericVector &bs, const NumericVector &as, const NumericVector &cs, const NumericMatrix &gs, const NumericMatrix &ds, int K,
+List fisherScoring(const NumericVector &bs, const NumericVector &as, const NumericVector &cs, const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK,
                    const NumericVector &rhat, const NumericVector &nhat, const NumericVector &points, bool extended,
-                   double lambda, double lambda2, int maxIter = 50)
+                   double lambda, double lambda2, double lambda3, int maxIter = 50, bool LASSO = false)
 {
   int M = bs.length();
   int PN = points.length();
   NumericVector newB(M);
   NumericVector newA(M);
   NumericVector newC(M, 1.0 / K);
+  LogicalVector conv(M);
   arma::vec t;
   arma::mat V;
   auto gMat = Rcpp::as<arma::mat>(gs);
@@ -248,6 +293,9 @@ List fisherScoring(const NumericVector &bs, const NumericVector &as, const Numer
 
   NumericMatrix newG(gMat.n_rows, gMat.n_cols);
   NumericMatrix newD(dMat.n_rows, dMat.n_cols);
+
+  if (MK == -1)
+    MK = K;
 
   for (int j = 0; j < M; ++j)
   {
@@ -281,56 +329,84 @@ List fisherScoring(const NumericVector &bs, const NumericVector &as, const Numer
       V.zeros(size, size);
       for (int f = 0; f < PN; ++f)
       {
-        for (int k = 0; k < K; ++k)
+        for (int k = 0; k < MK; ++k)
         {
-          auto deriv = item_deriv(k + 1, points[f], v(0), v(1), extended ? v(C_IDX) : 1.0 / K, gRow, dRow, K, extended);
+          auto deriv = item_deriv(k + 1, points[f], v(0), v(1), extended ? v(C_IDX) : 1.0 / K, gRow, dRow, K, MK, extended);
           auto d = deriv.first;
           auto H = deriv.second;
-          t += rhat[k + f * K + j * K * PN] * d;
-          V += -nhat[f] * item_single(k + 1, points[f], v(0), v(1), extended ? v(C_IDX) : 1.0 / K, gRow, dRow, K) * H;
+          t += rhat[k + f * MK + j * MK * PN] * d;
+          V += -nhat[f] * item_single(k + 1, points[f], v(0), v(1), extended ? v(C_IDX) : 1.0 / K, gRow, dRow, K, MK) * H;
         }
       }
 
       // Newton's method hack
-      if (arma::trace(V) < size)
-      {
-        V.diag() += 1.0;
-      }
+      //if (arma::trace(V) < (double) size / 5)
+      //{
+      //  V.diag() += 0.2;
+      //}
 
       // Regularization
       if (!nog)
       {
         for (unsigned int k = 0; k < ng; ++k)
         {
-          t(k + 2) += -lambda * v(k + 2);
-          V(k + 2, k + 2) += lambda;
+          if (LASSO)
+          {
+            t(k + 2) += -lambda * R::sign(v(k + 2));
+          }
+          else
+          {
+            t(k + 2) += -lambda * v(k + 2);
+            V(k + 2, k + 2) += lambda;
+          }
         }
       }
       if (!nod)
       {
         for (unsigned int k = 0; k < nd; ++k)
         {
-          t(k + 2 + ng) += -10 * v(k + 2 + ng);
-          V(k + 2 + ng, k + 2 + ng) += 10;
+          if (LASSO)
+          {
+            t(k + 2 + ng) += -lambda2 * R::sign(v(k + 2 + ng));
+          }
+          else
+          {
+            t(k + 2 + ng) += -lambda2 * v(k + 2 + ng);
+            V(k + 2 + ng, k + 2 + ng) += lambda2;
+          }
+        }
+      }
+      if (extended)
+      {
+        if (LASSO)
+        {
+          t(C_IDX) += -lambda3 * R::sign(v(C_IDX) - 1.0 / K);
+        }
+        else
+        {
+          t(C_IDX) += -lambda3 * (v(C_IDX) - 1.0 / K);
+          V(C_IDX, C_IDX) += lambda3;
         }
       }
 
-      if (extended)
-      {
-        t(C_IDX) += -lambda2 * (v(C_IDX) - 1.0 / K);
-        V(C_IDX, C_IDX) += lambda2;
-      }
-
       // if (arma::det(cov) < 0.0001) break;
-      if (t.has_nan())
+      if (t.has_nan()) {
+        Rcout << "break: t has NaN" << std::endl;
+        conv(j) = false;
         break;
-      if (V.has_nan())
+      }
+      if (V.has_nan()) {
+        Rcout << "break: V has NaN" << std::endl;
+        conv(j) = false;
         break;
+      }
       auto x_tmp = arma::solve(V, t, arma::solve_opts::likely_sympd);
       auto x = x_tmp.eval();
       // Convergence
-      if (arma::norm(x, 2) < 0.000001)
+      if (arma::norm(x, 2) < 0.000001) {
+        conv(j) = true;
         break;
+      }
 
       // Rcout << x << std::endl;
       /*
@@ -340,8 +416,9 @@ List fisherScoring(const NumericVector &bs, const NumericVector &as, const Numer
         else
           x(2 + gMat.n_cols) = -0.1;
       }*/
-      auto x2 = arma::clamp(x, -0.3, 0.3); // Avoid moving too much
+      auto x2 = arma::clamp(x, -0.1, 0.1); // Avoid moving too much
       v = v + x2;
+      conv(j) = false;
     }
     newB(j) = v(0);
     newA(j) = v(1);
@@ -361,17 +438,19 @@ List fisherScoring(const NumericVector &bs, const NumericVector &as, const Numer
                         _["a"] = newA,
                         _["c"] = newC,
                         _["g"] = newG,
-                        _["d"] = newD);
+                        _["d"] = newD,
+                        _["conv"] = conv);
   else
     return List::create(_["b"] = newB,
                         _["a"] = newA,
                         _["g"] = newG,
-                        _["d"] = newD);
+                        _["d"] = newD,
+                        _["conv"] = conv);
 }
 
 // [[Rcpp::export]]
-List EMSteps(const NumericMatrix &X, int K, const NumericVector &points, const NumericVector &weights,
-             double lambda, double lambda2, int ngs, int nds, int maxEMIter = 10, int maxNRIter = 50, bool verbose = false, bool exntended = true)
+List EMSteps(const NumericMatrix &X, int K, int MK, const NumericVector &points, const NumericVector &weights,
+             double lambda, double lambda2, double lambda3, int ngs, int nds, int maxEMIter = 10, int maxNRIter = 50, bool verbose = false, bool exntended = true, bool LASSO = false)
 {
   auto M = X.cols();
   NumericVector bs(M);
@@ -380,6 +459,7 @@ List EMSteps(const NumericMatrix &X, int K, const NumericVector &points, const N
   as.fill(0.1);
   NumericVector cs(M);
   cs.fill(1.0 / K);
+  LogicalVector conv(M);
 
   // if no g parameter. Still we provide the g matrix for simplicity.
   NumericMatrix gs(M, ngs + 1);
@@ -387,17 +467,21 @@ List EMSteps(const NumericMatrix &X, int K, const NumericVector &points, const N
   NumericMatrix ds(M, nds + 1);
   ds.fill(0);
 
+  if (MK == -1)
+    MK = K;
+
   for (int iter = 0; iter < maxEMIter; ++iter)
   {
-    auto E = EStep(X, bs, as, cs, gs, ds, K, points, weights);
+    auto E = EStep(X, bs, as, cs, gs, ds, K, MK, points, weights);
     auto rhat = E["rhat"];
     auto nhat = E["nhat"];
 
-    auto ret = fisherScoring(bs, as, cs, gs, ds, K, rhat, nhat, points, exntended, lambda, lambda2, maxNRIter);
+    auto ret = fisherScoring(bs, as, cs, gs, ds, K, MK, rhat, nhat, points, exntended, lambda, lambda2, lambda3, maxNRIter, LASSO);
     bs = ret["b"];
     as = ret["a"];
     if (exntended)
       cs = ret["c"];
+    conv = ret["conv"];
     gs = Rcpp::as<NumericMatrix>(ret["g"]);
     ds = Rcpp::as<NumericMatrix>(ret["d"]);
     if (verbose)
@@ -410,32 +494,36 @@ List EMSteps(const NumericMatrix &X, int K, const NumericVector &points, const N
                         _["a"] = as,
                         _["c"] = cs,
                         _["g"] = gs,
-                        _["d"] = ds);
+                        _["d"] = ds,
+                        _["conv"] = conv);
   }
   else
   {
     return List::create(_["b"] = bs,
                         _["a"] = as,
                         _["g"] = gs,
-                        _["d"] = ds);
+                        _["d"] = ds,
+                        _["conv"] = conv);
   }
 }
 
 // [[Rcpp::export]]
-double LogLikliTotal(const NumericMatrix &X, const NumericVector &bs, const NumericVector &as, const NumericVector &cs, const NumericMatrix &gs, const NumericMatrix &ds, int K,
+double LogLikliTotal(const NumericMatrix &X, const NumericVector &bs, const NumericVector &as, const NumericVector &cs, const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK,
                      const NumericVector &rhat, const NumericVector &points)
 {
   auto gMat = Rcpp::as<arma::mat>(gs);
   auto dMat = Rcpp::as<arma::mat>(ds);
   int PN = points.length();
   double ll = 0;
+  if (MK == -1)
+    MK = K;
   for (int j = 0; j < X.cols(); ++j)
   {
     for (int f = 0; f < PN; ++f)
     {
-      for (int k = 0; k < K; ++k)
+      for (int k = 0; k < MK; ++k)
       {
-        ll += rhat[k + f * K + j * K * PN] * log(item_single(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), dMat.row(j), K));
+        ll += rhat[k + f * MK + j * MK * PN] * log(item_single(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), dMat.row(j), K, MK));
       }
     }
   }
@@ -474,7 +562,7 @@ arma::vec LogLikliGrad(double j, double B, double A, arma::rowvec gs, int K,
 
 // [[Rcpp::export]]
 List SE(const NumericMatrix &X, NumericVector bs, NumericVector as, NumericVector cs,
-        const NumericMatrix &gs, const NumericMatrix &ds, int K, NumericVector points, const NumericVector &weights, bool extended)
+        const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK, NumericVector points, const NumericVector &weights, bool extended)
 {
 
   int M = bs.length();
@@ -492,7 +580,7 @@ List SE(const NumericMatrix &X, NumericVector bs, NumericVector as, NumericVecto
   const unsigned int ng = gMat.n_cols - 1;
   const bool nod = dMat.n_cols == 1;
   const unsigned int nd = dMat.n_cols - 1;
-  auto E = EStep(X, bs, as, cs, gs, ds, K, points, weights);
+  auto E = EStep(X, bs, as, cs, gs, ds, K, MK, points, weights);
   NumericVector rhat = E["rhat"];
   NumericVector nhat = E["nhat"];
 
@@ -503,10 +591,10 @@ List SE(const NumericMatrix &X, NumericVector bs, NumericVector as, NumericVecto
     V.zeros(size, size);
     for (int f = 0; f < PN; ++f)
     {
-      for (int k = 0; k < K; ++k)
+      for (int k = 0; k < MK; ++k)
       {
-        auto H = item_Hess(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), dMat.row(j), K, extended);
-        V += -nhat(f) * item_single(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), dMat.row(j), K) * H;
+        auto H = item_Hess(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), dMat.row(j), K, MK, extended);
+        V += -nhat(f) * item_single(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), dMat.row(j), K, MK) * H;
       }
     }
     // Rcout << "Determinant of Fisher Information Matrix is " << arma::det(V) << std::endl;
@@ -528,7 +616,7 @@ List SE(const NumericMatrix &X, NumericVector bs, NumericVector as, NumericVecto
     {
       for (unsigned int k = 0; k < nd; ++k)
       {
-        sdG(j, k + 1) = sd(k + 2 + ng);
+        sdD(j, k + 1) = sd(k + 2 + ng);
       }
     }
   }
@@ -541,14 +629,14 @@ List SE(const NumericMatrix &X, NumericVector bs, NumericVector as, NumericVecto
       {
         return List::create(_["b"] = sdB,
                             _["a"] = sdA,
-                            _["c"] = sdC,
-                            _["d"] = sdD);
+                            _["c"] = sdC);
       }
       else
       {
         return List::create(_["b"] = sdB,
                             _["a"] = sdA,
-                            _["c"] = sdC);
+                            _["c"] = sdC,
+                            _["d"] = sdD);
       }
     }
     else
@@ -558,15 +646,15 @@ List SE(const NumericMatrix &X, NumericVector bs, NumericVector as, NumericVecto
         return List::create(_["b"] = sdB,
                             _["a"] = sdA,
                             _["c"] = sdC,
-                            _["g"] = sdG,
-                            _["d"] = sdD);
+                            _["g"] = sdG);
       }
       else
       {
         return List::create(_["b"] = sdB,
                             _["a"] = sdA,
                             _["c"] = sdC,
-                            _["g"] = sdG);
+                            _["g"] = sdG,
+                            _["d"] = sdD);
       }
     }
   }
@@ -577,13 +665,13 @@ List SE(const NumericMatrix &X, NumericVector bs, NumericVector as, NumericVecto
       if (nod)
       {
         return List::create(_["b"] = sdB,
-                            _["a"] = sdA,
-                            _["d"] = sdD);
+                            _["a"] = sdA);
       }
       else
       {
         return List::create(_["b"] = sdB,
-                            _["a"] = sdA);
+                            _["a"] = sdA,
+                            _["d"] = sdD);
       }
     }
     else
@@ -592,21 +680,21 @@ List SE(const NumericMatrix &X, NumericVector bs, NumericVector as, NumericVecto
       {
         return List::create(_["b"] = sdB,
                             _["a"] = sdA,
-                            _["g"] = sdG,
-                            _["d"] = sdD);
+                            _["g"] = sdG);
       }
       else
       {
         return List::create(_["b"] = sdB,
                             _["a"] = sdA,
-                            _["g"] = sdG);
+                            _["g"] = sdG,
+                            _["d"] = sdD);
       }
     }
   }
 }
 
 // [[Rcpp::export]]
-NumericVector eap_theta(NumericMatrix X, NumericVector bs, NumericVector as, NumericVector cs, const NumericMatrix &gs, const NumericMatrix &ds, int K,
+NumericVector eap_theta(NumericMatrix X, NumericVector bs, NumericVector as, NumericVector cs, const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK,
                         NumericVector points, NumericVector weights)
 {
   int N = X.rows();
@@ -620,7 +708,7 @@ NumericVector eap_theta(NumericMatrix X, NumericVector bs, NumericVector as, Num
     double num = 0;
     for (int f = 0; f < PN; ++f)
     {
-      double l = item_vec(X(i, _), points[f], bs, as, cs, gMat, dMat, K);
+      double l = item_vec(X(i, _), points[f], bs, as, cs, gMat, dMat, K, MK);
       num += points[f] * l * weights[f];
       den += l * weights[f];
     }
@@ -674,7 +762,7 @@ NumericVector mle_theta(NumericMatrix X, NumericVector bs, NumericVector as, con
 }*/
 
 // [[Rcpp::export]]
-NumericVector PSD(NumericMatrix X, NumericVector thetas, NumericVector bs, NumericVector as, NumericVector cs, const NumericMatrix &gs, const NumericMatrix &ds, int K,
+NumericVector PSD(NumericMatrix X, NumericVector thetas, NumericVector bs, NumericVector as, NumericVector cs, const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK,
                   NumericVector points, NumericVector weights)
 {
   int N = X.rows();
@@ -688,7 +776,7 @@ NumericVector PSD(NumericMatrix X, NumericVector thetas, NumericVector bs, Numer
     double num = 0;
     for (int f = 0; f < PN; ++f)
     {
-      double l = item_vec(X(i, _), points[f], bs, as, cs, gMat, dMat, K);
+      double l = item_vec(X(i, _), points[f], bs, as, cs, gMat, dMat, K, MK);
       num += (points[f] - thetas(i)) * (points[f] - thetas(i)) * l * weights[f];
       den += l * weights[f];
     }
@@ -728,7 +816,7 @@ NumericVector eap_theta_irt(NumericMatrix X, NumericVector bs, NumericVector as,
 }
 
 // [[Rcpp::export]]
-NumericVector Score(NumericMatrix X, NumericVector scheme)
+NumericVector ScoreScheme(NumericMatrix X, NumericVector scheme)
 {
   int N = X.rows();
   int M = X.cols();
@@ -746,7 +834,7 @@ NumericVector Score(NumericMatrix X, NumericVector scheme)
 }
 
 // [[Rcpp::export]]
-NumericVector FI(NumericVector thetas, NumericVector bs, NumericVector as, NumericVector cs, const NumericMatrix &gs, const NumericMatrix &ds, int K)
+NumericVector FI(NumericVector thetas, NumericVector bs, NumericVector as, NumericVector cs, const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK)
 {
   int N = thetas.length();
   int M = bs.length();
@@ -754,6 +842,8 @@ NumericVector FI(NumericVector thetas, NumericVector bs, NumericVector as, Numer
   auto dMat = Rcpp::as<arma::mat>(ds);
   NumericVector fi(N);
   fi.fill(0);
+  if (MK == -1)
+    MK = K;
   for (int i = 0; i < N; ++i)
   {
     double theta = thetas(i);
@@ -762,20 +852,23 @@ NumericVector FI(NumericVector thetas, NumericVector bs, NumericVector as, Numer
       auto g = gMat.row(j);
       auto d = dMat.row(j);
       double a = as(j), b = bs(j), c = cs(j), tempFI = 0;
-      for (int y = 1; y <= K; ++y)
+      for (int y = 1; y <= MK; ++y)
       {
         double d2 = 0;
         double e = exp(Z(y, theta, b, a, g, d));
         double A = e / (c + e);
-        d2 = a * a * A * (1 - A);
+        double delta = 0;
+        if (y - 1 < d.n_elem)
+          delta = d(y - 1);
+        d2 = (a + delta) * (a + delta) * A * (1 - A);
 
         for (int k = 1; k <= y; ++k)
         {
           e = exp(Z(k, theta, b, a, g, d));
           double B = e / ((1.0 - c) * (K - k) / (K - 1.0) + c + e);
-          d2 -= a * a * B * (1 - B);
+          d2 -= (a + delta) * (a + delta) * B * (1 - B);
         }
-        tempFI += -item_single(y, theta, b, a, c, g, d, K) * d2;
+        tempFI += -item_single(y, theta, b, a, c, g, d, K, MK) * d2;
       }
       fi(i) += tempFI;
     }
