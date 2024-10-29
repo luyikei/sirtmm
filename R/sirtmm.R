@@ -226,8 +226,6 @@ estimate_log <- function(mod, data = NULL) {
 
 #' scoring using a scheme
 #'
-#' scoring using a scheme
-#'
 #' @param data A reponse matrix (the number of attempts)
 #' @param scheme A scoring scheme vector
 #' @export

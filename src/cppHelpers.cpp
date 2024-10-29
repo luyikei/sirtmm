@@ -978,7 +978,6 @@ NumericVector FI(NumericVector thetas, NumericVector bs, NumericVector as, Numer
             d2 -= (a + delta) * (a + delta) * B * (1 - B);
           }
         }
-
         tempFI += -item_single(y, theta, b, a, c, g, d, K, MK) * d2;
       }
       fi(i) += tempFI;
