@@ -1,0 +1,33 @@
+data(mmdata)
+
+mmdata3 <- mmdata
+
+# Maximum number of attempts set to 3
+mmdata3[mmdata3 == 4] <- 3
+
+# Fit two models
+mod1 <- sirtmm(mmdata3,
+    k = 4, mk = 3, itemtype = "SIRT-MM",
+    ngs = 1, nds = 0, lambda1 = 0.1,
+    lasso = F, verbose = F, quadpts = 15
+)
+mod2 <- sirtmm(mmdata3,
+    k = 4, mk = 3, itemtype = "SIRT-MM",
+    ngs = 0, nds = 0, lambda1 = 0.1,
+    lasso = F, verbose = F, quadpts = 15
+)
+
+# Print item parameter estimates
+print(mod1$itempar)
+print(mod2$itempar)
+
+
+# Print model fit statistics
+print(anova(mod1, mod2))
+
+# Estimate theta
+mod1_est <- estimate(mod1)
+mod2_est <- estimate(mod2)
+
+# Compare theta estimates between the two models
+plot(mod1_est$thetas, mod2_est$thetas)

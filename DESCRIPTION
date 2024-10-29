@@ -3,11 +3,11 @@ Type: Package
 Title: Sequential Item Response Models for Multiple-attempt, Multiple-choice test items
 Version: 1.0
 Date: 2023-03-22
-Author: Yikai Lu
-Maintainer: Yikai Lu <luyikei.qmltu@gmail.com>
+Author: Anonymous Smith
+Maintainer: Anonymous Smith <anonirtresearch@gmail.com>
 Description: Sequential Item Response Models for Multiple-attempt, Multiple-choice test items.
 License: GPL (>= 2)
 Imports: Rcpp (>= 1.0.8),
          fastGHQuad
-LinkingTo: Rcpp, RcppArmadillo 
-RoxygenNote: 7.2.3.9000
+LinkingTo: Rcpp, RcppArmadillo
+RoxygenNote: 7.2.3
