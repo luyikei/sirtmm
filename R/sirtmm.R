@@ -2,11 +2,14 @@
 #'
 #' @export
 pad_mat <- function(mat, M) {
-  if (!length(mat)) {
+  if (!length(mat) || (!is.matrix(mat) && length(mat) == 1 && all(!mat))) {
     nmat <- matrix(0, nrow = M, ncol = 1)
-  } else {
+  } else if ((is.matrix(mat) && nrow(mat) == M) || length(mat) == M) {
     nmat <- cbind(0, mat)
+  } else {
+    stop("mat, a vector or a matrix, needs to have M items!")
   }
+  nmat <- unname(nmat)
   nmat
 }
 
@@ -88,6 +91,8 @@ sirtmm <- function(data,
   data[data == -999] <- NA
 
   mod <- list(
+    N = nrow(data),
+    M = ncol(data),
     data = data,
     options = list(
       k = k,
@@ -117,6 +122,53 @@ sirtmm <- function(data,
   class(mod) <- "sirtmmModel"
   return(mod)
 }
+
+
+#' Create a model with fixed parameters
+#'
+#' Create a model with provided parameters 
+#'
+#' @param mod A SIRT-MM model
+#' @param data A reponse matrix used to estimate thetas
+#' @param method The estimation method (EAP, ML, or WLE)
+#' @param max_value The maximum absolute value for theta used for MLE estimation
+#' @example man/examples/sirtmm.R
+#' @export
+createSirtmmModel <- function(b, a, k, g.mat = 0, d.mat = 0, c = NULL, mk = -1) {
+  M <- length(b)
+  if (is.null(c)) {
+    c <- rep(1/k, M)
+    itemtype <- "SIRT-MM"
+  } else {
+    itemtype <- "SIRT-MMe"
+  }
+  ngs <- ifelse(all(!g.mat), 0, ncol(g.mat))
+  nds <- ifelse(all(!d.mat), 0, ncol(d.mat))
+  
+  if (ngs == 0) {
+    g.mat <- matrix(0, nrow=M, ncol=1)
+  }
+  if (nds == 0) {
+    d.mat <- matrix(0, nrow=M, ncol=1)
+  }
+  
+  mod <- list(
+    data = NULL,
+    options = list(
+      k = k,
+      mk = mk,
+      itemtype = itemtype,
+      ngs = ngs,
+      nds = nds
+    ),
+    itempar = data.frame(b=b, a=a, c=c, g=g.mat, d=d.mat),
+    g.mat = g.mat,
+    d.mat = d.mat
+  )
+  class(mod) <- "sirtmmModel"
+  return(mod)
+}
+
 
 #' ANOVA
 #'
@@ -152,75 +204,98 @@ anova.sirtmmModel <- function(...) {
   return(ret)
 }
 
+
+#' Test Information
+#'
+#' Test Information
+#'
+#' @param thetas A vector of thetas
+#' @param mod A sirtmmmodel object
+#' @export
+testinfoSirtmm <- function(thetas, mod) {
+  M <- nrow(mod$itempar)
+  theta.fi <- FI(
+    thetas, mod$itempar$b, mod$itempar$a, mod$itempar$c,
+    pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk
+  )
+  return(theta.fi)
+}
+
 #' Person Estimation
 #'
 #' Person parameters
 #'
 #' @param mod A SIRT-MM model
 #' @param data A reponse matrix used to estimate thetas
+#' @param method The estimation method (EAP, MLE, or WLE)
+#' @param max_value The maximum absolute value for theta used for MLE estimation
 #' @example man/examples/sirtmm.R
 #' @export
-estimate <- function(mod, data = NULL) {
+estimate <- function(mod, data = NULL, method = "EAP", max_value = 6) {
   if (is.null(data)) {
     data <- mod$data
   }
 
-  rule <- fastGHQuad::gaussHermiteData(61)
-  points <- rule$x
-  points <- points * sqrt(2)
-  weights <- rule$w
-  weights <- weights / sqrt(pi)
-
-  M <- nrow(mod$itempar)
-  thetas.est <- eap_theta(
-    data, mod$itempar$b, mod$itempar$a, mod$itempar$c,
-    pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk, points, weights
-  )
-  theta.fi <- FI(
-    thetas.est, mod$itempar$b, mod$itempar$a, mod$itempar$c,
-    pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk
-  )
-  se.theta <- 1 / sqrt(theta.fi)
-  return(list(
-    thetas = thetas.est,
-    fi = theta.fi,
-    se = se.theta
-  ))
-}
-
-
-#' Person Estimation
-#'
-#' Person parameters
-#'
-#' @param mod The reponse matrix
-#' @param data data
-estimate_log <- function(mod, data = NULL) {
-  if (is.null(data)) {
-    data <- mod$data
+  if (method == "EAP") {
+    if (is.null(mod$options$quadpts)) {
+      rule <- fastGHQuad::gaussHermiteData(61)
+      points <- rule$x
+      weights <- rule$w
+      points <- points * sqrt(2)
+      weights <- weights / sqrt(pi)
+    } else {
+      points <- mod$options$quadpts$points
+      weights <- mod$options$quadpts$weights
+    }
+    
+    M <- nrow(mod$itempar)
+    thetas.est <- eap_theta(
+      data, mod$itempar$b, mod$itempar$a, mod$itempar$c,
+      pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk, points, weights
+    )
+    theta.psd <- PSD(
+      data, thetas.est, mod$itempar$b, mod$itempar$a, mod$itempar$c,
+      pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk, points, weights
+    )
+    return(list(
+      thetas = thetas.est,
+      se = theta.psd
+    ))
+  } else if (method == "MLE") {
+    M <- nrow(mod$itempar)
+    thetas.est <- mle_theta(
+      data, mod$itempar$b, mod$itempar$a, mod$itempar$c,
+      pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk, max_value
+    )
+    theta.fi <- FI(
+      thetas.est, mod$itempar$b, mod$itempar$a, mod$itempar$c,
+      pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk
+    )
+    se.theta <- 1 / sqrt(theta.fi)
+    return(list(
+      thetas = thetas.est,
+      fi = theta.fi,
+      se = se.theta
+    ))
+  } else if (method == "WLE") {
+    M <- nrow(mod$itempar)
+    thetas.est <- wle_theta(
+      data, mod$itempar$b, mod$itempar$a, mod$itempar$c,
+      pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk
+    )
+    theta.fi <- FI(
+      thetas.est, mod$itempar$b, mod$itempar$a, mod$itempar$c,
+      pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk
+    )
+    se.theta <- 1 / sqrt(theta.fi)
+    return(list(
+      thetas = thetas.est,
+      fi = theta.fi,
+      se = se.theta
+    ))
+  } else {
+    stop("The provided method is not supported!")
   }
-
-  rule <- fastGHQuad::gaussHermiteData(61)
-  points <- rule$x
-  points <- points * sqrt(2)
-  weights <- rule$w
-  weights <- weights / sqrt(pi)
-
-  M <- nrow(mod$itempar)
-  thetas.est <- eap_theta_log(
-    data, mod$itempar$b, mod$itempar$a, mod$itempar$c,
-    pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk, points, weights
-  )
-  theta.fi <- FI(
-    thetas.est, mod$itempar$b, mod$itempar$a, mod$itempar$c,
-    pad_mat(mod$g.mat, M), pad_mat(mod$d.mat, M), mod$options$k, mod$options$mk
-  )
-  se.theta <- 1 / sqrt(theta.fi)
-  return(list(
-    thetas = thetas.est,
-    fi = theta.fi,
-    se = se.theta
-  ))
 }
 
 

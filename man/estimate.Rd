@@ -4,12 +4,16 @@
 \alias{estimate}
 \title{Person Estimation}
 \usage{
-estimate(mod, data = NULL)
+estimate(mod, data = NULL, method = "EAP", max_value = 6)
 }
 \arguments{
 \item{mod}{A SIRT-MM model}
 
 \item{data}{A reponse matrix used to estimate thetas}
+
+\item{method}{The estimation method (EAP, MLE, or WLE)}
+
+\item{max_value}{The maximum absolute value for theta used for MLE estimation}
 }
 \description{
 Person parameters

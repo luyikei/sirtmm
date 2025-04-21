@@ -4,7 +4,7 @@
 \alias{anova.sirtmmModel}
 \title{ANOVA}
 \usage{
-anova.sirtmmModel(...)
+\method{anova}{sirtmmModel}(...)
 }
 \arguments{
 \item{...}{SIRT-MM models.}

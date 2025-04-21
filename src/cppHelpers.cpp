@@ -5,6 +5,7 @@
 // [[Rcpp::depends(RcppArmadillo)]]
 #include <RcppArmadillo.h>
 #include <vector>
+#include <algorithm>
 using namespace Rcpp;
 
 const int MISS_VAL = -999;
@@ -808,50 +809,289 @@ NumericVector eap_theta(NumericMatrix X, NumericVector bs, NumericVector as, Num
   }
   return eap;
 }
-/*
+
+//' MLE for SIRT-MM using the second derivative (recommended)
+//'
+//' @export
 // [[Rcpp::export]]
-NumericVector mle_theta(NumericMatrix X, NumericVector bs, NumericVector as, NumericVector cs, const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK,
-                        NumericVector points, NumericVector weights){
+NumericVector mle_theta(NumericMatrix X, NumericVector bs, NumericVector as, NumericVector cs, const NumericMatrix &gs,
+                        const NumericMatrix &ds, int K, int MK, double max_value = 6)
+{
   int N = X.rows();
   int M = bs.length();
   auto gMat = Rcpp::as<arma::mat>(gs);
+  auto dMat = Rcpp::as<arma::mat>(ds);
   NumericVector est(N);
   est.fill(0);
-  for (int i = 0; i < N; ++i) {
+  for (int i = 0; i < N; ++i)
+  {
     double theta = 0;
-    for (int iter = 0; iter < 50; ++iter) {
+    for (int iter = 0; iter < 50; ++iter)
+    {
       double fi = 0;
       double grad = 0;
-      for (int j = 0; j < M; ++j) {
+      for (int j = 0; j < M; ++j)
+      {
+        if (X(i, j) == MISS_VAL)
+        {
+          continue;
+        }
         auto g = gMat.row(j);
-        double a = as(j), b = bs(j);
-        for (int y = 1; y <= K; ++y) {
+        auto d = dMat.row(j);
+        double a = as(j), b = bs(j), c = cs(j);
+        for (int y = 1; y <= K; ++y)
+        {
           double d2 = 0;
-          double e = K * exp( Z(y, theta, b, a, g) );
-          double A = e / (1 + e);
-          d2 = a * a * A * (1 - A);
-          if (y == X(i,j))
-            grad += a * A;
-
-          for (int k = 1; k <= y; ++k) {
-            e = K * exp( Z(k, theta, b, a, g) );
-            double B = e / (K - k + 1 + e);
-            d2 -= a * a * B * (1 - B);
-            if (y == X(i,j))
-              grad -= a*B;
+          double e = exp(Z(y, theta, b, a, g, d));
+          double A = e / (c + e);
+          double delta = 0;
+          if (y - 1 < d.n_elem)
+          {
+            delta = d(y - 1);
           }
-          fi += - item_single(y, theta, b, a, g, K) * d2;
+
+          if (y == X(i, j))
+            grad += (a + delta) * A;
+
+          d2 = (a + delta) * (a + delta) * A * (1 - A);
+          for (int k = 1; k <= y; ++k)
+          {
+            e = exp(Z(y, theta, b, a, g, d));
+            double B = e / ((1.0 - c) * (K - k) / (K - 1.0) + c + e);
+            d2 -= (a + delta) * (a + delta) * B * (1 - B);
+            if (y == X(i, j))
+              grad -= (a + delta) * B;
+          }
+          fi += -item_single(y, theta, b, a, c, g, d, K, MK) * d2;
         }
       }
       double x = grad / fi;
-      if (std::abs(x) > 0.1)
-        x = 0.1 * (grad / fi) / std::abs(x);
+      if (std::abs(x) > 1)
+        x = x / std::abs(x); // clamp [-1, 1]
+      else if (std::abs(x) < 0.005)
+        break;
+
+      double new_theta = theta + x;
+      if (std::abs(new_theta) > max_value)
+        new_theta = new_theta / std::abs(new_theta) * max_value; // clamp [-6, 6]
+      if (std::abs(theta - new_theta) < 0.0001)
+        break;
+      theta = new_theta;
+    }
+    est(i) = theta;
+  }
+  return est;
+}
+
+//' MLE for 3PL
+//'
+//' @export
+// [[Rcpp::export]]
+NumericVector mle_theta_3PL(NumericMatrix X, NumericVector bs, NumericVector as, NumericVector cs, double max_value = 6)
+{
+  int N = X.rows();
+  int M = bs.length();
+  NumericVector est(N);
+  est.fill(0);
+  for (int i = 0; i < N; ++i)
+  {
+    double theta = 0;
+    for (int iter = 0; iter < 50; ++iter)
+    {
+      double fi = 0;
+      double grad = 0;
+
+      for (int j = 0; j < M; ++j)
+      {
+        if (X(i, j) == MISS_VAL)
+        {
+          continue;
+        }
+
+        // # prod (p^x)(q^(1-x))
+        // # sum x log p + (1-x) log (1-p)
+        // # sum x (p'/p) - (1-x) (p'/(1-p))
+
+        double x = X(i, j);
+        double a = as(j), b = bs(j), c = cs(j);
+        double p = c + (1 - c) / (1 + std::exp(-a * (theta - b)));
+        double q = 1 - p;
+        double p1 = a * (p - c) / (1 - c) * q;
+        grad += x * p1 / p - (1.0 - x) * p1 / q;
+        fi += std::pow(a * (p - c) / (1 - c), 2) * q / p;
+      }
+
+      double x = grad / fi;
+      if (std::abs(x) > 1)
+        x = x / std::abs(x); // clamp [-1, 1]
+      else if (std::abs(x) < 0.005)
+        break;
+
+      double new_theta = theta + x;
+      if (std::abs(new_theta) > max_value)
+        new_theta = new_theta / std::abs(new_theta) * max_value; // clamp [-6, 6]
+      if (std::abs(theta - new_theta) < 0.0001)
+        break;
+      theta = new_theta;
+    }
+    est(i) = theta;
+  }
+  return est;
+}
+
+//' MLE for SIRT-MM using the original Fisher Info definiton
+//'
+//' @export
+// [[Rcpp::export]]
+NumericVector mle2_theta(NumericMatrix X, NumericVector bs, NumericVector as, NumericVector cs, const NumericMatrix &gs,
+                         const NumericMatrix &ds, int K, int MK, double max_value = 6)
+{
+  int N = X.rows();
+  int M = bs.length();
+  auto gMat = Rcpp::as<arma::mat>(gs);
+  auto dMat = Rcpp::as<arma::mat>(ds);
+  NumericVector est(N);
+  est.fill(0);
+  for (int i = 0; i < N; ++i)
+  {
+    double theta = 0;
+    for (int iter = 0; iter < 50; ++iter)
+    {
+      double fi = 0;
+      double grad = 0;
+      for (int j = 0; j < M; ++j)
+      {
+        if (X(i, j) == MISS_VAL)
+        {
+          continue;
+        }
+        auto g = gMat.row(j);
+        auto d = dMat.row(j);
+        double a = as(j), b = bs(j), c = cs(j);
+        for (int y = 1; y <= K; ++y)
+        {
+          double d1 = 0;
+          double d2 = 0;
+          double e = exp(Z(y, theta, b, a, g, d));
+          double A = e / (c + e);
+          double delta = 0;
+          if (y - 1 < d.n_elem)
+          {
+            delta = d(y - 1);
+          }
+
+          d1 += (a + delta) * A;
+
+          // d2 = (a + delta) * (a + delta) * A * (1 - A);
+          for (int k = 1; k <= y; ++k)
+          {
+            e = exp(Z(y, theta, b, a, g, d));
+            double B = e / ((1.0 - c) * (K - k) / (K - 1.0) + c + e);
+            // d2 -= (a + delta) * (a + delta) * B * (1 - B);
+            d1 -= (a + delta) * B;
+          }
+
+          if (y == X(i, j))
+            grad += d1;
+          fi += item_single(y, theta, b, a, c, g, d, K, MK) * d1 * d1;
+        }
+      }
+      double x = grad / fi;
+      if (std::abs(x) > 1)
+        x = x / std::abs(x); // clamp [-1, 1]
+      else if (std::abs(x) < 0.005)
+        break;
+
+      double new_theta = theta + x;
+      if (std::abs(new_theta) > max_value)
+        new_theta = new_theta / std::abs(new_theta) * max_value; // clamp [-6, 6]
+      if (std::abs(theta - new_theta) < 0.0001)
+        break;
+      theta = new_theta;
+    }
+    est(i) = theta;
+  }
+  return est;
+}
+
+//' WLE for SIRT-MM
+//'
+//' @export
+// [[Rcpp::export]]
+NumericVector wle_theta(NumericMatrix X, NumericVector bs, NumericVector as, NumericVector cs, const NumericMatrix &gs,
+                        const NumericMatrix &ds, int K, int MK)
+{
+  int N = X.rows();
+  int M = bs.length();
+  auto gMat = Rcpp::as<arma::mat>(gs);
+  auto dMat = Rcpp::as<arma::mat>(ds);
+  NumericVector est(N);
+  est.fill(0);
+  for (int i = 0; i < N; ++i)
+  {
+    double theta = 0;
+    double x_old = 1;
+    for (int iter = 0; iter < 50; ++iter)
+    {
+      double fi = 0;
+      double J = 0;
+      double grad = 0;
+      for (int j = 0; j < M; ++j)
+      {
+        if (X(i, j) == MISS_VAL)
+        {
+          continue;
+        }
+        auto g = gMat.row(j);
+        auto d = dMat.row(j);
+        double a = as(j), b = bs(j), c = cs(j);
+        for (int y = 1; y <= K; ++y)
+        {
+          double d1 = 0;
+          double d2 = 0;
+          double e = exp(Z(y, theta, b, a, g, d));
+          double A = e / (c + e);
+          double delta = 0;
+          if (y - 1 < d.n_elem)
+          {
+            delta = d(y - 1);
+          }
+
+          d1 += (a + delta) * A;
+
+          d2 = (a + delta) * (a + delta) * A * (1 - A);
+          for (int k = 1; k <= y; ++k)
+          {
+            e = exp(Z(y, theta, b, a, g, d));
+            double B = e / ((1.0 - c) * (K - k) / (K - 1.0) + c + e);
+            d2 -= (a + delta) * (a + delta) * B * (1 - B);
+            d1 -= (a + delta) * B;
+          }
+
+          if (y == X(i, j))
+            grad += d1;
+          double p = item_single(y, theta, b, a, c, g, d, K, MK);
+          fi += p * d1 * d1;
+          J += p * d1 * (d2 + d1 * d1);
+        }
+      }
+      // Rcout << iter << ": " << theta << " + " << grad << " + " << J / fi / 2 << std::endl;
+      double x = grad + J / fi / 2;
+      if (std::abs(x) > 1 && iter < 6)
+        x = x / std::abs(x); // clamp [-1, 1]
+      else if (std::abs(x) < 0.005)
+        break;
+      else
+        x = x / std::abs(x) * std::abs(x_old) / 2;
+      x_old = x;
+      // Rcout << iter << ": " << x << std::endl;
+
       theta = theta + x;
     }
     est(i) = theta;
   }
   return est;
-}*/
+}
 
 // [[Rcpp::export]]
 NumericVector PSD(NumericMatrix X, NumericVector thetas, NumericVector bs, NumericVector as, NumericVector cs, const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK,
@@ -877,8 +1117,11 @@ NumericVector PSD(NumericMatrix X, NumericVector thetas, NumericVector bs, Numer
   return psd;
 }
 
+//' EAP for 3PL
+//'
+//' @export
 // [[Rcpp::export]]
-NumericVector eap_theta_irt(NumericMatrix X, NumericVector bs, NumericVector as, NumericVector cs, int K,
+NumericVector eap_theta_3PL(NumericMatrix X, NumericVector bs, NumericVector as, NumericVector cs,
                             NumericVector points, NumericVector weights)
 {
   int N = X.rows();
@@ -986,6 +1229,67 @@ NumericVector FI(NumericVector thetas, NumericVector bs, NumericVector as, Numer
   return fi;
 }
 
+//' Item Information for SIRT-MM
+//'
+//' @export
+// [[Rcpp::export]]
+NumericVector ItemFI(double theta,
+                     NumericVector bs, NumericVector as, NumericVector cs,
+                     const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK)
+{
+  int M = bs.length();
+  auto gMat = Rcpp::as<arma::mat>(gs);
+  auto dMat = Rcpp::as<arma::mat>(ds);
+  NumericVector fi(M);
+  fi.fill(0);
+  if (MK == -1)
+    MK = K;
+  for (int j = 0; j < M; ++j)
+  {
+    auto g = gMat.row(j);
+    auto d = dMat.row(j);
+    double a = as(j), b = bs(j), c = cs(j), tempFI = 0;
+    for (int y = 1; y <= MK; ++y)
+    {
+      double d2 = 0;
+      double e = exp(Z(y, theta, b, a, g, d));
+      double A = e / (c + e);
+      double delta = 0;
+      if (y - 1 < d.n_elem)
+        delta = d(y - 1);
+
+      if (y == MK && MK < K)
+      {
+        for (int k = 1; k <= y - 1; ++k)
+        {
+          auto zd1 = (a + delta);
+          double e = exp(Z(k, theta, b, a, g, d));
+          double C = ((double)K - 1.0) / ((K - k) * (1.0 - c) + (K - 1.0) * (c + e));
+          double D = e * C;
+          d2 -= (zd1 * zd1) * D * (1.0 - D);
+        }
+      }
+      else
+      {
+        d2 = (a + delta) * (a + delta) * A * (1 - A);
+
+        for (int k = 1; k <= y; ++k)
+        {
+          e = exp(Z(k, theta, b, a, g, d));
+          double B = e / ((1.0 - c) * (K - k) / (K - 1.0) + c + e);
+          d2 -= (a + delta) * (a + delta) * B * (1 - B);
+        }
+      }
+      tempFI += -item_single(y, theta, b, a, c, g, d, K, MK) * d2;
+    }
+    fi(j) = tempFI;
+  }
+  return fi;
+}
+
+//' Test Information for 3PL
+//'
+//' @export
 // [[Rcpp::export]]
 NumericVector FI3PL(NumericVector thetas, NumericVector bs, NumericVector as, NumericVector cs)
 {
@@ -1004,6 +1308,25 @@ NumericVector FI3PL(NumericVector thetas, NumericVector bs, NumericVector as, Nu
 
       fi(i) += std::pow(a * (p - c) / (1 - c), 2) * q / p;
     }
+  }
+  return fi;
+}
+
+//' Item Information of the 3PL model
+//'
+//' @export
+// [[Rcpp::export]]
+NumericVector ItemFI3PL(double theta, NumericVector bs, NumericVector as, NumericVector cs)
+{
+  int M = bs.length();
+  NumericVector fi(M);
+  fi.fill(0);
+  for (int j = 0; j < M; ++j)
+  {
+    double a = as(j), b = bs(j), c = cs(j);
+    double p = c + (1 - c) / (1 + std::exp(-a * (theta - b)));
+    double q = 1 - p;
+    fi(j) = std::pow(a * (p - c) / (1 - c), 2) * q / p;
   }
   return fi;
 }
