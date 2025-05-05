@@ -39,7 +39,7 @@ item_single_all <- function(theta, b, a, c, g, d, K, MK = -1) {
 #' @param ngs a number of gammma parameters.
 #' @param nds a number of delta parameters.
 #' @param verbose output debug information during estimation.
-#' @param lasso use LASSO instead of Ridge for regularization.
+#' @param penalty Specify penalty. "Ridge", "LASSO", or "SCAD"
 #' @example man/examples/sirtmm.R
 #' @export
 sirtmm <- function(data,
@@ -56,7 +56,7 @@ sirtmm <- function(data,
                    ngs = 1,
                    nds = 0,
                    verbose = FALSE,
-                   lasso = FALSE) {
+                   penalty = "LASSO") {
   rule <- fastGHQuad::gaussHermiteData(quadpts)
   points <- rule$x
   points <- points * sqrt(2)
@@ -75,11 +75,24 @@ sirtmm <- function(data,
     }
   }
 
-  extended <- ifelse(itemtype == "SIRT-MMe", TRUE, FALSE)
+  if (mk == -1) {
+    mk <- k
+  }
 
-  res <- EMSteps(data, k, mk, points, weights, lambda1, lambda2, lambda3, ngs, nds, max_emsteps, max_nriter, verbose, extended, lasso)
+  extended <- ifelse(itemtype == "SIRT-MMe", TRUE, FALSE)
+  
+  penaltyint <- switch(penalty,
+         Ridge = 0,
+         LASSO = 1,
+         SCAD = 2,
+         AdaptiveLASSO = 3,
+         999) 
+
+  res <- EMSteps(data, k, mk, points, weights, lambda1, lambda2, lambda3,
+                 ngs, nds, max_emsteps, max_nriter, verbose, extended, penaltyint)
   if (itemtype == "SIRT-MM") res[["c"]] <- rep(1 / k, ncol(data))
-  se <- SE(data, res[["b"]], res[["a"]], res[["c"]], res[["g"]], res[["d"]], k, mk, points, weights, extended)
+  se <- SE(data, res[["b"]], res[["a"]], res[["c"]], res[["g"]], res[["d"]],
+           k, mk, points, weights, extended)
 
   conv <- res[["conv"]]
   res[["conv"]] <- NULL
@@ -126,7 +139,7 @@ sirtmm <- function(data,
 
 #' Create a model with fixed parameters
 #'
-#' Create a model with provided parameters 
+#' Create a model with provided parameters
 #'
 #' @param mod A SIRT-MM model
 #' @param data A reponse matrix used to estimate thetas
@@ -137,21 +150,21 @@ sirtmm <- function(data,
 createSirtmmModel <- function(b, a, k, g.mat = 0, d.mat = 0, c = NULL, mk = -1) {
   M <- length(b)
   if (is.null(c)) {
-    c <- rep(1/k, M)
+    c <- rep(1 / k, M)
     itemtype <- "SIRT-MM"
   } else {
     itemtype <- "SIRT-MMe"
   }
   ngs <- ifelse(all(!g.mat), 0, ncol(g.mat))
   nds <- ifelse(all(!d.mat), 0, ncol(d.mat))
-  
+
   if (ngs == 0) {
-    g.mat <- matrix(0, nrow=M, ncol=1)
+    g.mat <- matrix(0, nrow = M, ncol = 1)
   }
   if (nds == 0) {
-    d.mat <- matrix(0, nrow=M, ncol=1)
+    d.mat <- matrix(0, nrow = M, ncol = 1)
   }
-  
+
   mod <- list(
     data = NULL,
     options = list(
@@ -161,7 +174,7 @@ createSirtmmModel <- function(b, a, k, g.mat = 0, d.mat = 0, c = NULL, mk = -1) 
       ngs = ngs,
       nds = nds
     ),
-    itempar = data.frame(b=b, a=a, c=c, g=g.mat, d=d.mat),
+    itempar = data.frame(b = b, a = a, c = c, g = g.mat, d = d.mat),
     g.mat = g.mat,
     d.mat = d.mat
   )
@@ -197,7 +210,7 @@ anova.sirtmmModel <- function(...) {
     ret <- rbind(ret, data.frame(
       AIC = c(2 * npar - 2 * logLik),
       BIC = c(npar * log(N) - 2 * logLik),
-      logLik = c(logLik),
+      logLik = logLik,
       npar = npar
     ))
   }
@@ -247,7 +260,7 @@ estimate <- function(mod, data = NULL, method = "EAP", max_value = 6) {
       points <- mod$options$quadpts$points
       weights <- mod$options$quadpts$weights
     }
-    
+
     M <- nrow(mod$itempar)
     thetas.est <- eap_theta(
       data, mod$itempar$b, mod$itempar$a, mod$itempar$c,

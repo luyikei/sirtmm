@@ -9,6 +9,22 @@
 using namespace Rcpp;
 
 const int MISS_VAL = -999;
+const double sml = 1e-6;
+const double lsml = 1e-3;
+
+enum class RegType
+{
+  Ridge,
+  LASSO,
+  SCAD,
+  AdaptiveLASSO
+};
+
+double LSE(double a, double b)
+{
+  double m = std::max(a, b);
+  return m + log(exp(a - m) + exp(b - m));
+}
 
 double Z(unsigned int y, double theta, double b, double a, const arma::rowvec &g, const arma::rowvec &d, bool nobround = false)
 {
@@ -25,14 +41,14 @@ double Z(unsigned int y, double theta, double b, double a, const arma::rowvec &g
     if (y - 1 < d.n_elem)
       r += d(y - 1) * (theta - b + g(y - 1));
   }
-  if (!nobround && r > 700)
-    return 700;
+  // if (!nobround && r > 700)
+  //   return 700;
   return r;
 }
 
 void z_d(arma::mat &zd1, unsigned int y, double theta, double b, double a, const arma::rowvec &g, const arma::rowvec &d)
 {
-  zd1.fill(0);
+  zd1.fill(0.0);
   zd1(0) = -a;        // b
   zd1(1) = theta - b; // a
   if (1 < y && y - 1 < g.n_elem)
@@ -51,7 +67,7 @@ void z_d(arma::mat &zd1, unsigned int y, double theta, double b, double a, const
 
 void z_Hess(arma::mat &zH, unsigned int y, double theta, double b, double a, const arma::rowvec &g, const arma::rowvec &d)
 {
-  zH.fill(0);
+  zH.fill(0.0);
   zH(1, 0) = -1;
   zH(0, 1) = -1;
   if (1 < y && y - 1 < g.n_elem)
@@ -123,26 +139,41 @@ std::pair<arma::vec, arma::mat> item_deriv(int y, double theta, double b, double
   z_d(zd1, y, theta, b, a, g, dp);
   z_Hess(H, y, theta, b, a, g, dp);
 
-  double e = exp(Z(y, theta, b, a, g, dp));
-  double A = e / (c + e);
+  // double e  = exp(z);
+  // double A  = e / (c + e);
+
+  double z = Z(y, theta, b, a, g, dp);
+  double A = 1.0 / (1.0 + c * exp(-z));
   d = zd1 * A;
   V = H * A + zd1 * zd1.t() * A * (1 - A);
 
   if (extended)
   {
-    d(C_IDX) = 1 / (c + e) - (y - 1) / (1 - c);
-    V(C_IDX, C_IDX) = -1 / (c + e) / (c + e) - (y - 1) / (1 - c) / (1 - c);
+    double logDen = LSE(log(c), z);           // log(c + e^z)
+    double invDen = exp(-logDen);             // 1 / (c + e)
+    double e_over_den2 = exp(z - 2 * logDen); // e / (c + e)^2
+
+    // d(C_IDX) = 1.0 / (c + e) - (y - 1) / (1 - c);
+    d(C_IDX) = invDen - ((double)y - 1.0) / (1.0 - c);
+
+    // V(C_IDX, C_IDX) = -1.0 / (c + e) / (c + e) - (y - 1) / (1 - c) / (1 - c);
+    V(C_IDX, C_IDX) = -invDen * invDen - ((double)y - 1.0) / ((1.0 - c) * (1.0 - c));
+
     for (unsigned int i = 0; i < C_IDX; ++i)
     {
-      V(C_IDX, i) = V(i, C_IDX) = -zd1(i) * e / (c + e) / (c + e);
+      // V(C_IDX, i) = V(i, C_IDX) = -zd1(i) * e / (c + e) / (c + e);
+      V(C_IDX, i) = V(i, C_IDX) = -zd1(i) * e_over_den2;
     }
   }
 
   for (int k = 1; k <= y; ++k)
   {
-    e = exp(Z(k, theta, b, a, g, dp));
-    double Cd = ((1.0 - c) * (K - k) / (K - 1.0) + c + e);
-    double B = e / Cd;
+    // e = exp(Z(k, theta, b, a, g, dp));
+    //   double Cd = ((1.0 - c) * (K - k) / (K - 1.0) + c + e);
+    //   double B = e / Cd;
+    double z = Z(k, theta, b, a, g, dp);
+    double B = 1.0 / (((1.0 - c) * (K - k) / (K - 1.0) + c) * exp(-z) + 1.0);
+
     z_d(zd1, k, theta, b, a, g, dp);
     z_Hess(H, k, theta, b, a, g, dp);
     d -= zd1 * B;
@@ -150,12 +181,30 @@ std::pair<arma::vec, arma::mat> item_deriv(int y, double theta, double b, double
 
     if (extended)
     {
-      double C = (-(K - k) / (K - 1.0) + 1.0) / Cd;
+      double coef = (-((double)K - k) / (K - 1.0) + 1.0);
+      double logCd = LSE(log((1.0 - c) * (K - k) / (K - 1.0) + c), z); // log( (1‑c)(K‑k)/(K‑1)+c ,  e )
+      double invCd = exp(-logCd);                                      // 1 / Cd
+      double C = coef * invCd;                                         // old C
+      // double C = (-((double)K - k) / (K - 1.0) + 1.0) / Cd;
+
+      // if (d.has_nan())
+      // {
+      //   Rcout << "!--" << std::endl;
+      //   Rcout << c << std::endl;
+      //   Rcout << k << std::endl;
+      //   Rcout << z << std::endl;
+      //   Rcout << logCd << std::endl;
+      //   Rcout << C << std::endl;
+      //   Rcout << "--!" << std::endl;
+      // }
+
       d(C_IDX) -= C;
       V(C_IDX, C_IDX) += C * C;
       for (unsigned int i = 0; i < C_IDX; ++i)
       {
-        V(i, C_IDX) += zd1(i) * (-(K - k) / (K - 1.0) + 1.0) * e / Cd / Cd;
+        // V(i, C_IDX) += zd1(i) * (-((double)K - k) / (K - 1.0) + 1.0) * e / Cd / Cd;
+        double e_over_Cd2 = exp(z - 2 * logCd); // e / Cd²
+        V(i, C_IDX) += zd1(i) * coef * e_over_Cd2;
         V(C_IDX, i) = V(i, C_IDX);
       }
     }
@@ -168,7 +217,9 @@ std::pair<arma::vec, arma::mat> item_deriv(int y, double theta, double b, double
 //'
 //' @export
 // [[Rcpp::export]]
-double item_single(unsigned int y, double theta, double b, double a, double c, const arma::rowvec &g, const arma::rowvec &d, int K, unsigned int MK)
+double item_single(
+    unsigned int y, double theta, double b, double a, double c,
+    const arma::rowvec &g, const arma::rowvec &d, int K, unsigned int MK)
 {
   double num = 1;
   double den = 1;
@@ -196,17 +247,13 @@ double item_single(unsigned int y, double theta, double b, double a, double c, c
   return num / den;
 }
 
-double LSE(double a, double b)
-{
-  double m = std::max(a, b);
-  return m + log(exp(a - m) + exp(b - m));
-}
-
 //' Item Response Function
 //'
 //' @export
 // [[Rcpp::export]]
-double item_single_log(unsigned int y, double theta, double b, double a, double c, const arma::rowvec &g, const arma::rowvec &d, int K, unsigned int MK)
+double item_single_log(
+    unsigned int y, double theta, double b, double a, double c,
+    const arma::rowvec &g, const arma::rowvec &d, int K, unsigned int MK)
 {
   double num = 0;
   double den = 0;
@@ -235,7 +282,8 @@ double item_single_log(unsigned int y, double theta, double b, double a, double 
 }
 
 // [[Rcpp::export]]
-arma::vec item_d(int y, double theta, double b, double a, double c, const arma::rowvec &g, const arma::rowvec &d, int K, int MK, bool extended)
+arma::vec item_d(int y, double theta, double b, double a, double c,
+                 const arma::rowvec &g, const arma::rowvec &d, int K, int MK, bool extended)
 {
   return item_deriv(y, theta, b, a, c, g, d, K, MK, extended).first;
 }
@@ -315,10 +363,11 @@ List EStep(const NumericMatrix &X, const NumericVector &bs, const NumericVector 
 }
 
 // [[Rcpp::export]]
-List fisherScoring(const NumericVector &bs, const NumericVector &as, const NumericVector &cs, const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK,
-                   const NumericVector &rhat, const NumericVector &nhat, const NumericVector &points, bool extended,
-                   double lambda, double lambda2, double lambda3, int maxIter = 50, bool LASSO = false)
+List iterativeEstimation(int N, const NumericVector &bs, const NumericVector &as, const NumericVector &cs, const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK,
+                         const NumericVector &rhat, const NumericVector &nhat, const NumericVector &points, const arma::mat &pweights,
+                         bool extended, double lambda, double lambda2, double lambda3, int maxIter = 50, unsigned int penalty = 0, bool scoring = true)
 {
+
   int M = bs.length();
   int PN = points.length();
   NumericVector newB(M);
@@ -339,6 +388,29 @@ List fisherScoring(const NumericVector &bs, const NumericVector &as, const Numer
 
   NumericMatrix newG(gMat.n_rows, gMat.n_cols);
   NumericMatrix newD(dMat.n_rows, dMat.n_cols);
+
+  auto SCAD1d = [](double alpha, double beta, double L)
+  {
+    double abeta = std::abs(beta);
+    if (abeta <= L)
+    {
+      return L;
+    }
+    else if (L < abeta && abeta <= alpha * L)
+    {
+      return (alpha * L - abeta) / (alpha - 1);
+    }
+    return 0.0;
+  };
+  // auto SCAD2d = [](double alpha, double beta, double lambda)
+  // {
+  //   double abeta = std::abs(beta);
+  //   if (lambda < abeta && abeta <= alpha * lambda)
+  //   {
+  //     return -1.0 / (alpha - 1);
+  //   }
+  //   return 0.0;
+  // };
 
   if (MK == -1)
     MK = K;
@@ -373,6 +445,12 @@ List fisherScoring(const NumericVector &bs, const NumericVector &as, const Numer
       }
       t.zeros(size);
       V.zeros(size, size);
+
+      // arma::rowvec NK(MK);
+      // for (int k = 0; k < MK; ++k)
+      //   NK(k) = N;
+      //  Rcout << NK << std::endl;
+
       for (int f = 0; f < PN; ++f)
       {
         for (int k = 0; k < MK; ++k)
@@ -381,29 +459,54 @@ List fisherScoring(const NumericVector &bs, const NumericVector &as, const Numer
           auto d = deriv.first;
           auto H = deriv.second;
           t += rhat[k + f * MK + j * MK * PN] * d;
-          V += -nhat[f] * item_single(k + 1, points[f], v(0), v(1), extended ? v(C_IDX) : 1.0 / K, gRow, dRow, K, MK) * H;
+          if (scoring)
+          {
+            V += -nhat[f] * item_single(k + 1, points[f], v(0), v(1), extended ? v(C_IDX) : 1.0 / K, gRow, dRow, K, MK) * H;
+          }
+          else
+          {
+            V += -rhat[k + f * MK + j * MK * PN] * H;
+          }
+          // for (int kk = k + 1; kk < MK; ++kk)
+          //   NK(kk) -= rhat[k + f * MK + j * MK * PN];
         }
       }
 
+      // Rcout << NK << std::endl;
+
       // Newton's method hack
-      if (arma::trace(V) < (double)size / 5)
-      {
-        V.diag() += 0.01;
-      }
+      // if (arma::trace(V) < (double)size / 5)
+      //{
+      //  V.diag() += 0.01;
+      //}
 
       // Regularization
       if (!nog)
       {
         for (unsigned int k = 0; k < ng; ++k)
         {
-          if (LASSO)
+          if (RegType(penalty) == RegType::LASSO || (i < 5 && RegType(penalty) == RegType::SCAD))
           {
-            t(k + 2) += -lambda * R::sign(v(k + 2));
+            t(k + 2) += -lambda * N * (v(k + 2)) / (std::abs(v(k + 2)) + sml);
+            V(k + 2, k + 2) += lambda * N / (std::abs(v(k + 2)) + sml);
           }
-          else
+          else if (RegType(penalty) == RegType::Ridge)
           {
-            t(k + 2) += -lambda * v(k + 2);
-            V(k + 2, k + 2) += lambda;
+            t(k + 2) += -lambda * N * v(k + 2);
+            V(k + 2, k + 2) += lambda * N;
+          }
+          else if (RegType(penalty) == RegType::SCAD)
+          {
+            double beta = v(k + 2);
+            double pen = SCAD1d(3.7, beta, lambda);
+
+            t(k + 2) += -N * pen * beta / std::abs(beta + sml);
+            V(k + 2, k + 2) += N * pen / std::abs(beta + sml);
+          }
+          else if (RegType(penalty) == RegType::AdaptiveLASSO || (i < 5 && RegType(penalty) == RegType::SCAD))
+          {
+            t(k + 2) += -lambda / (abs(pweights(j, k)) + sml) * N * (v(k + 2)) / (std::abs(v(k + 2)) + sml);
+            V(k + 2, k + 2) += lambda / (abs(pweights(j, k)) + sml) * N / (std::abs(v(k + 2)) + sml);
           }
         }
       }
@@ -411,27 +514,55 @@ List fisherScoring(const NumericVector &bs, const NumericVector &as, const Numer
       {
         for (unsigned int k = 0; k < nd; ++k)
         {
-          if (LASSO)
+          if (RegType(penalty) == RegType::LASSO || (i < 5 && RegType(penalty) == RegType::SCAD))
           {
-            t(k + 2 + ng) += -lambda2 * R::sign(v(k + 2 + ng));
+            t(k + 2 + ng) += -lambda2 * N * (v(k + 2 + ng)) / (std::abs(v(k + 2 + ng)) + sml);
+            V(k + 2 + ng, k + 2 + ng) += lambda2 * N / (std::abs(v(k + 2 + ng)) + sml);
           }
-          else
+          else if (RegType(penalty) == RegType::Ridge)
           {
-            t(k + 2 + ng) += -lambda2 * v(k + 2 + ng);
-            V(k + 2 + ng, k + 2 + ng) += lambda2;
+            t(k + 2 + ng) += -lambda2 * N * v(k + 2 + ng);
+            V(k + 2 + ng, k + 2 + ng) += lambda2 * N;
+          }
+          else if (RegType(penalty) == RegType::SCAD)
+          {
+            double beta = v(k + 2 + ng);
+            double pen = SCAD1d(3.7, beta, lambda2);
+
+            t(k + 2 + ng) += -N * pen * beta / std::abs(beta + sml);
+            V(k + 2 + ng, k + 2 + ng) += N * pen / std::abs(beta + sml);
+          }
+          else if (RegType(penalty) == RegType::AdaptiveLASSO || (i < 5 && RegType(penalty) == RegType::SCAD))
+          {
+            t(k + 2 + ng) += -lambda2 / (abs(pweights(j, k + ng)) + sml) * N * (v(k + 2 + ng)) / (std::abs(v(k + 2 + ng)) + sml);
+            V(k + 2 + ng, k + 2 + ng) += lambda2 / (abs(pweights(j, k + ng)) + sml) * N / (std::abs(v(k + 2 + ng)) + sml);
           }
         }
       }
       if (extended)
       {
-        if (LASSO)
+        if (RegType(penalty) == RegType::LASSO || (i < 5 && RegType(penalty) == RegType::SCAD))
         {
-          t(C_IDX) += -lambda3 * R::sign(v(C_IDX) - 1.0 / K);
+          t(C_IDX) += -lambda3 * N * (v(C_IDX) - 1.0 / K) / (std::abs(v(C_IDX) - 1.0 / K) + sml);
+          V(C_IDX, C_IDX) += lambda3 * N / (std::abs(v(C_IDX) - 1.0 / K) + sml);
         }
-        else
+        else if (RegType(penalty) == RegType::Ridge)
         {
-          t(C_IDX) += -lambda3 * (v(C_IDX) - 1.0 / K);
-          V(C_IDX, C_IDX) += lambda3;
+          t(C_IDX) += -lambda3 * N * (v(C_IDX) - 1.0 / K);
+          V(C_IDX, C_IDX) += lambda3 * N;
+        }
+        else if (RegType(penalty) == RegType::SCAD)
+        {
+          double beta = (v(C_IDX) - 1.0 / K);
+          double pen = SCAD1d(3.7, beta, lambda3);
+
+          t(C_IDX) += -N * pen * beta / std::abs(beta + sml);
+          V(C_IDX, C_IDX) += N * pen / std::abs(beta + sml);
+        }
+        else if (RegType(penalty) == RegType::AdaptiveLASSO || (i < 5 && RegType(penalty) == RegType::SCAD))
+        {
+          t(C_IDX) += -lambda3 / (abs(pweights(j, ng + nd)) + sml) * N * (v(C_IDX) - 1.0 / K) / (std::abs(v(C_IDX) - 1.0 / K) + sml);
+          V(C_IDX, C_IDX) += lambda3 / (abs(pweights(j, ng + nd)) + sml) * N / (std::abs(v(C_IDX) - 1.0 / K) + sml);
         }
       }
 
@@ -467,6 +598,15 @@ List fisherScoring(const NumericVector &bs, const NumericVector &as, const Numer
       }*/
       auto x2 = arma::clamp(x, -0.1, 0.1); // Avoid moving too much
       v = v + x2;
+      if (extended)
+      {
+        double c = v(C_IDX);
+        if (c < 0.0)
+          c = 0.0;
+        else if (c > 1.0)
+          c = 1.0;
+        v(C_IDX) = c;
+      }
       conv(j) = false;
     }
     newB(j) = v(0);
@@ -499,9 +639,11 @@ List fisherScoring(const NumericVector &bs, const NumericVector &as, const Numer
 
 // [[Rcpp::export]]
 List EMSteps(const NumericMatrix &X, int K, int MK, const NumericVector &points, const NumericVector &weights,
-             double lambda, double lambda2, double lambda3, int ngs, int nds, int maxEMIter = 10, int maxNRIter = 50, bool verbose = false, bool exntended = true, bool LASSO = false)
+             double lambda, double lambda2, double lambda3, int ngs, int nds, int maxEMIter = 10, int maxNRIter = 50, bool verbose = false, bool extended = true,
+             unsigned int penalty = 0)
 {
   auto M = X.cols();
+  auto N = X.rows();
   NumericVector bs(M);
   bs.fill(0);
   NumericVector as(M);
@@ -519,16 +661,23 @@ List EMSteps(const NumericMatrix &X, int K, int MK, const NumericVector &points,
   if (MK == -1)
     MK = K;
 
+  bool AL = RegType(penalty) == RegType::AdaptiveLASSO;
+
+  arma::mat pweights(M, ngs + nds + (unsigned)extended);
+  pweights.fill(1);
+
   for (int iter = 0; iter < maxEMIter; ++iter)
   {
     auto E = EStep(X, bs, as, cs, gs, ds, K, MK, points, weights);
     auto rhat = E["rhat"];
     auto nhat = E["nhat"];
 
-    auto ret = fisherScoring(bs, as, cs, gs, ds, K, MK, rhat, nhat, points, exntended, lambda, lambda2, lambda3, maxNRIter, LASSO);
+    auto ret = iterativeEstimation(N, bs, as, cs, gs, ds, K, MK, rhat, nhat, points, pweights,
+                                   extended, AL ? 1e-5 : lambda, AL ? 1e-5 : lambda2, AL ? 1e-5 : lambda3, maxNRIter, AL ? 0 : penalty);
+
     bs = ret["b"];
     as = ret["a"];
-    if (exntended)
+    if (extended)
       cs = ret["c"];
     conv = ret["conv"];
     gs = Rcpp::as<NumericMatrix>(ret["g"]);
@@ -537,7 +686,47 @@ List EMSteps(const NumericMatrix &X, int K, int MK, const NumericVector &points,
       Rcout << "EM Step"
             << " " << iter + 1 << std::endl;
   }
-  if (exntended)
+
+  if (AL)
+  {
+    for (int i = 0; i < M; ++i)
+    {
+      for (int j = 0; j < ngs; ++j)
+      {
+        pweights(i, j) = gs(i, j + 1);
+      }
+      for (int j = 0; j < nds; ++j)
+      {
+        pweights(i, ngs + j) = ds(i, j + 1);
+      }
+      if (extended)
+      {
+        pweights(i, ngs + nds) = cs(i);
+      }
+    }
+
+    for (int iter = 0; iter < 3; ++iter)
+    {
+      auto E = EStep(X, bs, as, cs, gs, ds, K, MK, points, weights);
+      auto rhat = E["rhat"];
+      auto nhat = E["nhat"];
+
+      auto ret = iterativeEstimation(N, bs, as, cs, gs, ds, K, MK, rhat, nhat, points, pweights,
+                                     extended, lambda, lambda2, lambda3, maxNRIter, penalty);
+      bs = ret["b"];
+      as = ret["a"];
+      if (extended)
+        cs = ret["c"];
+      conv = ret["conv"];
+      gs = Rcpp::as<NumericMatrix>(ret["g"]);
+      ds = Rcpp::as<NumericMatrix>(ret["d"]);
+      if (verbose)
+        Rcout << "EM Step"
+              << " " << iter + 1 << std::endl;
+    }
+  }
+
+  if (extended)
   {
     return List::create(_["b"] = bs,
                         _["a"] = as,
@@ -647,9 +836,18 @@ List SE(const NumericMatrix &X, NumericVector bs, NumericVector as, NumericVecto
       }
     }
     // Rcout << "Determinant of Fisher Information Matrix is " << arma::det(V) << std::endl;
-    arma::mat cov = arma::pinv(V);
+    arma::mat cov;
+    bool ok = arma::pinv(cov, V);
     arma::vec dg = cov.diag();
-    arma::vec sd = sqrt(dg);
+    arma::vec sd(size);
+    if (ok)
+    {
+      sd = sqrt(dg);
+    }
+    else
+    {
+      sd.fill(1e9);
+    }
     sdB(j) = sd(0);
     sdA(j) = sd(1);
     if (extended)
@@ -914,7 +1112,7 @@ NumericVector mle_theta_3PL(NumericMatrix X, NumericVector bs, NumericVector as,
 
         double x = X(i, j);
         double a = as(j), b = bs(j), c = cs(j);
-        double p = c + (1 - c) / (1 + std::exp(-a * (theta - b)));
+        double p = c + (1 - c) / (1 + exp(-a * (theta - b)));
         double q = 1 - p;
         double p1 = a * (p - c) / (1 - c) * q;
         grad += x * p1 / p - (1.0 - x) * p1 / q;
@@ -1303,7 +1501,7 @@ NumericVector FI3PL(NumericVector thetas, NumericVector bs, NumericVector as, Nu
     for (int j = 0; j < M; ++j)
     {
       double a = as(j), b = bs(j), c = cs(j);
-      double p = c + (1 - c) / (1 + std::exp(-a * (theta - b)));
+      double p = c + (1 - c) / (1 + exp(-a * (theta - b)));
       double q = 1 - p;
 
       fi(i) += std::pow(a * (p - c) / (1 - c), 2) * q / p;
@@ -1324,7 +1522,7 @@ NumericVector ItemFI3PL(double theta, NumericVector bs, NumericVector as, Numeri
   for (int j = 0; j < M; ++j)
   {
     double a = as(j), b = bs(j), c = cs(j);
-    double p = c + (1 - c) / (1 + std::exp(-a * (theta - b)));
+    double p = c + (1 - c) / (1 + exp(-a * (theta - b)));
     double q = 1 - p;
     fi(j) = std::pow(a * (p - c) / (1 - c), 2) * q / p;
   }
