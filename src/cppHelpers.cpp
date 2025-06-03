@@ -362,6 +362,20 @@ List EStep(const NumericMatrix &X, const NumericVector &bs, const NumericVector 
   return List::create(_["rhat"] = rhat, _["nhat"] = nMat);
 }
 
+double SCAD1d(double alpha, double beta, double L)
+{
+  double abeta = std::abs(beta);
+  if (abeta <= L)
+  {
+    return L;
+  }
+  else if (L < abeta && abeta <= alpha * L)
+  {
+    return (alpha * L - abeta) / (alpha - 1);
+  }
+  return 0.0;
+};
+
 // [[Rcpp::export]]
 List iterativeEstimation(int N, const NumericVector &bs, const NumericVector &as, const NumericVector &cs, const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK,
                          const NumericVector &rhat, const NumericVector &nhat, const NumericVector &points, const arma::mat &pweights,
@@ -388,20 +402,6 @@ List iterativeEstimation(int N, const NumericVector &bs, const NumericVector &as
 
   NumericMatrix newG(gMat.n_rows, gMat.n_cols);
   NumericMatrix newD(dMat.n_rows, dMat.n_cols);
-
-  auto SCAD1d = [](double alpha, double beta, double L)
-  {
-    double abeta = std::abs(beta);
-    if (abeta <= L)
-    {
-      return L;
-    }
-    else if (L < abeta && abeta <= alpha * L)
-    {
-      return (alpha * L - abeta) / (alpha - 1);
-    }
-    return 0.0;
-  };
   // auto SCAD2d = [](double alpha, double beta, double lambda)
   // {
   //   double abeta = std::abs(beta);
@@ -503,7 +503,7 @@ List iterativeEstimation(int N, const NumericVector &bs, const NumericVector &as
             t(k + 2) += -N * pen * beta / std::abs(beta + sml);
             V(k + 2, k + 2) += N * pen / std::abs(beta + sml);
           }
-          else if (RegType(penalty) == RegType::AdaptiveLASSO || (i < 5 && RegType(penalty) == RegType::SCAD))
+          else if (RegType(penalty) == RegType::AdaptiveLASSO)
           {
             t(k + 2) += -lambda / (abs(pweights(j, k)) + sml) * N * (v(k + 2)) / (std::abs(v(k + 2)) + sml);
             V(k + 2, k + 2) += lambda / (abs(pweights(j, k)) + sml) * N / (std::abs(v(k + 2)) + sml);
@@ -532,7 +532,7 @@ List iterativeEstimation(int N, const NumericVector &bs, const NumericVector &as
             t(k + 2 + ng) += -N * pen * beta / std::abs(beta + sml);
             V(k + 2 + ng, k + 2 + ng) += N * pen / std::abs(beta + sml);
           }
-          else if (RegType(penalty) == RegType::AdaptiveLASSO || (i < 5 && RegType(penalty) == RegType::SCAD))
+          else if (RegType(penalty) == RegType::AdaptiveLASSO)
           {
             t(k + 2 + ng) += -lambda2 / (abs(pweights(j, k + ng)) + sml) * N * (v(k + 2 + ng)) / (std::abs(v(k + 2 + ng)) + sml);
             V(k + 2 + ng, k + 2 + ng) += lambda2 / (abs(pweights(j, k + ng)) + sml) * N / (std::abs(v(k + 2 + ng)) + sml);
@@ -559,7 +559,7 @@ List iterativeEstimation(int N, const NumericVector &bs, const NumericVector &as
           t(C_IDX) += -N * pen * beta / std::abs(beta + sml);
           V(C_IDX, C_IDX) += N * pen / std::abs(beta + sml);
         }
-        else if (RegType(penalty) == RegType::AdaptiveLASSO || (i < 5 && RegType(penalty) == RegType::SCAD))
+        else if (RegType(penalty) == RegType::AdaptiveLASSO)
         {
           t(C_IDX) += -lambda3 / (abs(pweights(j, ng + nd)) + sml) * N * (v(C_IDX) - 1.0 / K) / (std::abs(v(C_IDX) - 1.0 / K) + sml);
           V(C_IDX, C_IDX) += lambda3 / (abs(pweights(j, ng + nd)) + sml) * N / (std::abs(v(C_IDX) - 1.0 / K) + sml);
@@ -638,9 +638,196 @@ List iterativeEstimation(int N, const NumericVector &bs, const NumericVector &as
 }
 
 // [[Rcpp::export]]
+List SE(const NumericMatrix &X, NumericVector bs, NumericVector as, NumericVector cs,
+        const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK, NumericVector points, const NumericVector &weights,
+        bool extended, const arma::mat &pweights, int penalty = 0, bool sandwitch = true, double lambda = 0, double lambda2 = 0, double lambda3 = 0)
+{
+  int N = X.nrow();
+  int M = bs.length();
+  int PN = points.length();
+  NumericVector sdB(M);
+  NumericVector sdA(M);
+  NumericVector sdC(M);
+  NumericMatrix sdG(gs.rows(), gs.cols());
+  NumericMatrix sdD(ds.rows(), ds.cols());
+
+  arma::mat J;
+  arma::mat V;
+  // arma::vec El;
+  auto gMat = Rcpp::as<arma::mat>(gs);
+  auto dMat = Rcpp::as<arma::mat>(ds);
+  const bool nog = gMat.n_cols == 1;
+  const unsigned int ng = gMat.n_cols - 1;
+  const bool nod = dMat.n_cols == 1;
+  const unsigned int nd = dMat.n_cols - 1;
+  auto E = EStep(X, bs, as, cs, gs, ds, K, MK, points, weights);
+  NumericVector rhat = E["rhat"];
+  NumericVector nhat = E["nhat"];
+
+  const int size = extended ? gMat.n_cols + dMat.n_cols + 1 : gMat.n_cols + dMat.n_cols;
+
+  for (int j = 0; j < M; ++j)
+  {
+    J.zeros(size, size);
+    if (sandwitch)
+    {
+      V.zeros(size, size);
+    }
+
+    for (int f = 0; f < PN; ++f)
+    {
+      for (int k = 0; k < MK; ++k)
+      {
+        auto deriv = item_deriv(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), dMat.row(j), K, MK, extended);
+        auto d = deriv.first;
+        auto H = deriv.second;
+        if (sandwitch)
+        {
+          // V_n(θ) = var_g{∇ ln ℓ(θ)}
+          // J_n(θ) = −E_g{∇² ln ℓ(θ)}
+          // J_n(θ)^-1 V_n(θ) J_n(θ)^-1
+          J += -nhat(f) * item_single(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), dMat.row(j), K, MK) * H;
+          V += nhat(f) * item_single(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), dMat.row(j), K, MK) * d * d.t();
+          // El += nhat(f) * item_single(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), dMat.row(j), K, MK) * d;
+
+          if (!nog)
+          {
+            for (unsigned int k = 0; k < ng; ++k)
+            {
+              double g = gMat(j, 1 + k);
+              if (RegType(penalty) == RegType::LASSO)
+                J(k + 2, k + 2) += lambda * N / (std::abs(g) + sml);
+              else if (RegType(penalty) == RegType::Ridge)
+                J(k + 2, k + 2) += lambda * N;
+              else if (RegType(penalty) == RegType::SCAD)
+              {
+                double pen = SCAD1d(3.7, g, lambda);
+                J(k + 2, k + 2) += N * pen / std::abs(g + sml);
+              }
+              else if (RegType(penalty) == RegType::AdaptiveLASSO)
+                J(k + 2, k + 2) += lambda / (abs(pweights(j, k)) + sml) * N / (std::abs(g) + sml);
+            }
+          }
+          if (!nod)
+          {
+            for (unsigned int k = 0; k < nd; ++k)
+            {
+              double d = dMat(j, 1 + k);
+              if (RegType(penalty) == RegType::LASSO)
+                J(k + 2 + ng, k + 2 + ng) += lambda2 * N / (std::abs(d) + sml);
+              else if (RegType(penalty) == RegType::Ridge)
+                J(k + 2 + ng, k + 2 + ng) += lambda2 * N;
+              else if (RegType(penalty) == RegType::SCAD)
+              {
+                double pen = SCAD1d(3.7, d, lambda2);
+                J(k + 2 + ng, k + 2 + ng) += N * pen / std::abs(d + sml);
+              }
+              else if (RegType(penalty) == RegType::AdaptiveLASSO)
+                J(k + 2 + ng, k + 2 + ng) += lambda2 / (abs(pweights(j, k + ng)) + sml) * N / (std::abs(d) + sml);
+            }
+          }
+          if (extended)
+          {
+            unsigned C_IDX = size - 1;
+            if (RegType(penalty) == RegType::LASSO)
+              J(C_IDX, C_IDX) += lambda3 * N / (std::abs(cs[j] - 1.0 / K) + sml);
+            else if (RegType(penalty) == RegType::Ridge)
+              J(C_IDX, C_IDX) += lambda3 * N;
+            else if (RegType(penalty) == RegType::SCAD)
+            {
+              double beta = (cs[j] - 1.0 / K);
+              double pen = SCAD1d(3.7, beta, lambda3);
+              J(C_IDX, C_IDX) += N * pen / std::abs(beta + sml);
+            }
+            else if (RegType(penalty) == RegType::AdaptiveLASSO)
+              J(C_IDX, C_IDX) += lambda3 / (abs(pweights(j, ng + nd)) + sml) * N / (std::abs(cs[j] - 1.0 / K) + sml);
+          }
+        }
+        else
+        {
+          J += -nhat(f) * item_single(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), dMat.row(j), K, MK) * H;
+        }
+      }
+    }
+
+    arma::mat cov;
+    arma::vec sd(size);
+
+    if (sandwitch)
+    {
+      // Rcout << V << std::endl;
+      // V -= El * El.t();
+
+      // first solve  J * X = V      → X = J^{-1} V
+      bool ok = arma::solve(cov, J, V, arma::solve_opts::likely_sympd);
+
+      if (ok)
+      {
+
+        // second solve J * Sᵗ = Xᵗ    → S = (J^{-1} Xᵗ)ᵗ = J^{-1} V J^{-1}
+        arma::mat S = arma::solve(J, cov.t(), arma::solve_opts::likely_sympd).t();
+        arma::vec dg = S.diag();
+        sd = sqrt(dg);
+      }
+      else
+      {
+        sd.fill(1e9);
+      }
+    }
+    else
+    {
+      // Rcout << "Determinant of Fisher Information Matrix is " << arma::det(J) << std::endl;
+      bool ok = arma::pinv(cov, J);
+      arma::vec dg = cov.diag();
+      if (ok)
+      {
+        sd = sqrt(dg);
+      }
+      else
+      {
+        sd.fill(1e9);
+      }
+    }
+    sdB(j) = sd(0);
+    sdA(j) = sd(1);
+    if (extended)
+      sdC(j) = sd(size - 1);
+    if (!nog)
+    {
+      for (unsigned int k = 0; k < ng; ++k)
+      {
+        sdG(j, k + 1) = sd(k + 2);
+      }
+    }
+    if (!nod)
+    {
+      for (unsigned int k = 0; k < nd; ++k)
+      {
+        sdD(j, k + 1) = sd(k + 2 + ng);
+      }
+    }
+  }
+
+  // Always-present components
+  List res = List::create(
+      _["b"] = sdB,
+      _["a"] = sdA);
+
+  // Add conditionally
+  if (extended)
+    res["c"] = sdC; // include c when extended
+  if (!nog)
+    res["g"] = sdG; // include g unless nog is true
+  if (!nod)
+    res["d"] = sdD; // include d unless nod is true
+
+  return res;
+}
+
+// [[Rcpp::export]]
 List EMSteps(const NumericMatrix &X, int K, int MK, const NumericVector &points, const NumericVector &weights,
              double lambda, double lambda2, double lambda3, int ngs, int nds, int maxEMIter = 10, int maxNRIter = 50, bool verbose = false, bool extended = true,
-             unsigned int penalty = 0)
+             unsigned int penalty = 0, bool sandwitch = true)
 {
   auto M = X.cols();
   auto N = X.rows();
@@ -726,6 +913,10 @@ List EMSteps(const NumericMatrix &X, int K, int MK, const NumericVector &points,
     }
   }
 
+  // auto E = EStep(X, bs, as, cs, gs, ds, K, MK, points, weights);
+
+  auto se = SE(X, bs, as, cs, gs, ds, K, MK, points, weights, extended, pweights, penalty, sandwitch, lambda, lambda2, lambda3);
+
   if (extended)
   {
     return List::create(_["b"] = bs,
@@ -733,6 +924,7 @@ List EMSteps(const NumericMatrix &X, int K, int MK, const NumericVector &points,
                         _["c"] = cs,
                         _["g"] = gs,
                         _["d"] = ds,
+                        _["se"] = se,
                         _["conv"] = conv);
   }
   else
@@ -741,6 +933,7 @@ List EMSteps(const NumericMatrix &X, int K, int MK, const NumericVector &points,
                         _["a"] = as,
                         _["g"] = gs,
                         _["d"] = ds,
+                        _["se"] = se,
                         _["conv"] = conv);
   }
 }
@@ -797,148 +990,6 @@ arma::vec LogLikliGrad(double j, double B, double A, arma::rowvec gs, int K,
   return t;
 }
 */
-
-// [[Rcpp::export]]
-List SE(const NumericMatrix &X, NumericVector bs, NumericVector as, NumericVector cs,
-        const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK, NumericVector points, const NumericVector &weights, bool extended)
-{
-
-  int M = bs.length();
-  int PN = points.length();
-  NumericVector sdB(M);
-  NumericVector sdA(M);
-  NumericVector sdC(M);
-  NumericMatrix sdG(gs.rows(), gs.cols());
-  NumericMatrix sdD(ds.rows(), ds.cols());
-
-  arma::mat V;
-  auto gMat = Rcpp::as<arma::mat>(gs);
-  auto dMat = Rcpp::as<arma::mat>(ds);
-  const bool nog = gMat.n_cols == 1;
-  const unsigned int ng = gMat.n_cols - 1;
-  const bool nod = dMat.n_cols == 1;
-  const unsigned int nd = dMat.n_cols - 1;
-  auto E = EStep(X, bs, as, cs, gs, ds, K, MK, points, weights);
-  NumericVector rhat = E["rhat"];
-  NumericVector nhat = E["nhat"];
-
-  const int size = extended ? gMat.n_cols + dMat.n_cols + 1 : gMat.n_cols + dMat.n_cols;
-
-  for (int j = 0; j < M; ++j)
-  {
-    V.zeros(size, size);
-    for (int f = 0; f < PN; ++f)
-    {
-      for (int k = 0; k < MK; ++k)
-      {
-        auto H = item_Hess(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), dMat.row(j), K, MK, extended);
-        V += -nhat(f) * item_single(k + 1, points[f], bs[j], as[j], cs[j], gMat.row(j), dMat.row(j), K, MK) * H;
-      }
-    }
-    // Rcout << "Determinant of Fisher Information Matrix is " << arma::det(V) << std::endl;
-    arma::mat cov;
-    bool ok = arma::pinv(cov, V);
-    arma::vec dg = cov.diag();
-    arma::vec sd(size);
-    if (ok)
-    {
-      sd = sqrt(dg);
-    }
-    else
-    {
-      sd.fill(1e9);
-    }
-    sdB(j) = sd(0);
-    sdA(j) = sd(1);
-    if (extended)
-      sdC(j) = sd(cov.n_cols - 1);
-    if (!nog)
-    {
-      for (unsigned int k = 0; k < ng; ++k)
-      {
-        sdG(j, k + 1) = sd(k + 2);
-      }
-    }
-    if (!nod)
-    {
-      for (unsigned int k = 0; k < nd; ++k)
-      {
-        sdD(j, k + 1) = sd(k + 2 + ng);
-      }
-    }
-  }
-
-  if (extended)
-  {
-    if (nog)
-    {
-      if (nod)
-      {
-        return List::create(_["b"] = sdB,
-                            _["a"] = sdA,
-                            _["c"] = sdC);
-      }
-      else
-      {
-        return List::create(_["b"] = sdB,
-                            _["a"] = sdA,
-                            _["c"] = sdC,
-                            _["d"] = sdD);
-      }
-    }
-    else
-    {
-      if (nod)
-      {
-        return List::create(_["b"] = sdB,
-                            _["a"] = sdA,
-                            _["c"] = sdC,
-                            _["g"] = sdG);
-      }
-      else
-      {
-        return List::create(_["b"] = sdB,
-                            _["a"] = sdA,
-                            _["c"] = sdC,
-                            _["g"] = sdG,
-                            _["d"] = sdD);
-      }
-    }
-  }
-  else
-  {
-    if (nog)
-    {
-      if (nod)
-      {
-        return List::create(_["b"] = sdB,
-                            _["a"] = sdA);
-      }
-      else
-      {
-        return List::create(_["b"] = sdB,
-                            _["a"] = sdA,
-                            _["d"] = sdD);
-      }
-    }
-    else
-    {
-      if (nod)
-      {
-        return List::create(_["b"] = sdB,
-                            _["a"] = sdA,
-                            _["g"] = sdG);
-      }
-      else
-      {
-        return List::create(_["b"] = sdB,
-                            _["a"] = sdA,
-                            _["g"] = sdG,
-                            _["d"] = sdD);
-      }
-    }
-  }
-}
 
 // [[Rcpp::export]]
 NumericVector eap_theta_log(NumericMatrix X, NumericVector bs, NumericVector as, NumericVector cs, const NumericMatrix &gs, const NumericMatrix &ds, int K, int MK,

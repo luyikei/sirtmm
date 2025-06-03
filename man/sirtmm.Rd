@@ -19,7 +19,8 @@ sirtmm(
   ngs = 1,
   nds = 0,
   verbose = FALSE,
-  lasso = FALSE
+  penalty = "LASSO",
+  sandwitch = TRUE
 )
 }
 \arguments{
@@ -49,15 +50,18 @@ sirtmm(
 
 \item{verbose}{output debug information during estimation.}
 
-\item{lasso}{use LASSO instead of Ridge for regularization.}
+\item{penalty}{Specify penalty. "Ridge", "LASSO", or "SCAD"}
 }
 \description{
 sirtmm fits a SIRT-MM model to number of attempts data using marginal maximum likelihood estimation with an EM algorithm.
 }
 \examples{
-data(mmdata)
 
-mmdata3 <- mmdata
+# Replicating Lu et al. (2025) !! This version doesn't utilize regularization.
+data(mmdata2)
+
+# Remove four items that led to bad convergence
+mmdata3 <- mmdata2[, -c(19, 16, 10, 13)]
 
 # Maximum number of attempts set to 3
 mmdata3[mmdata3 == 4] <- 3
@@ -65,13 +69,13 @@ mmdata3[mmdata3 == 4] <- 3
 # Fit two models
 mod1 <- sirtmm(mmdata3,
     k = 4, mk = 3, itemtype = "SIRT-MM",
-    ngs = 1, nds = 0, lambda1 = 0.1,
-    lasso = F, verbose = F, quadpts = 15
+    ngs = 1, nds = 0, lambda1 = 0, lambda2 = 0,
+    lambda3 = 0, max_nriter = 10, verbose = F, quadpts = 31
 )
 mod2 <- sirtmm(mmdata3,
     k = 4, mk = 3, itemtype = "SIRT-MM",
-    ngs = 0, nds = 0, lambda1 = 0.1,
-    lasso = F, verbose = F, quadpts = 15
+    ngs = 0, nds = 0, lambda1 = 0, lambda2 = 0,
+    lambda3 = 0, max_nriter = 10, verbose = F, quadpts = 31
 )
 
 # Print item parameter estimates

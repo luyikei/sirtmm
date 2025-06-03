@@ -56,7 +56,8 @@ sirtmm <- function(data,
                    ngs = 1,
                    nds = 0,
                    verbose = FALSE,
-                   penalty = "LASSO") {
+                   penalty = "LASSO",
+                   sandwitch = TRUE) {
   rule <- fastGHQuad::gaussHermiteData(quadpts)
   points <- rule$x
   points <- points * sqrt(2)
@@ -80,22 +81,27 @@ sirtmm <- function(data,
   }
 
   extended <- ifelse(itemtype == "SIRT-MMe", TRUE, FALSE)
-  
-  penaltyint <- switch(penalty,
-         Ridge = 0,
-         LASSO = 1,
-         SCAD = 2,
-         AdaptiveLASSO = 3,
-         999) 
 
-  res <- EMSteps(data, k, mk, points, weights, lambda1, lambda2, lambda3,
-                 ngs, nds, max_emsteps, max_nriter, verbose, extended, penaltyint)
+  penaltyint <- switch(penalty,
+    Ridge = 0,
+    LASSO = 1,
+    SCAD = 2,
+    AdaptiveLASSO = 3,
+    999
+  )
+
+  res <- EMSteps(
+    data, k, mk, points, weights, lambda1, lambda2, lambda3,
+    ngs, nds, max_emsteps, max_nriter, verbose, extended, penaltyint, sandwitch
+  )
   if (itemtype == "SIRT-MM") res[["c"]] <- rep(1 / k, ncol(data))
-  se <- SE(data, res[["b"]], res[["a"]], res[["c"]], res[["g"]], res[["d"]],
-           k, mk, points, weights, extended)
+  # se <- SE(data, res[["b"]], res[["a"]], res[["c"]], res[["g"]], res[["d"]],
+  #         k, mk, points, weights, extended)
 
   conv <- res[["conv"]]
+  se <- res[["se"]]
   res[["conv"]] <- NULL
+  res[["se"]] <- NULL
   res[["g"]] <- res[["g"]][, -1]
   res[["d"]] <- res[["d"]][, -1]
   se[["g"]] <- se[["g"]][, -1]
@@ -141,10 +147,6 @@ sirtmm <- function(data,
 #'
 #' Create a model with provided parameters
 #'
-#' @param mod A SIRT-MM model
-#' @param data A reponse matrix used to estimate thetas
-#' @param method The estimation method (EAP, ML, or WLE)
-#' @param max_value The maximum absolute value for theta used for MLE estimation
 #' @example man/examples/sirtmm.R
 #' @export
 createSirtmmModel <- function(b, a, k, g.mat = 0, d.mat = 0, c = NULL, mk = -1) {
@@ -250,15 +252,15 @@ estimate <- function(mod, data = NULL, method = "EAP", max_value = 6) {
   }
 
   if (method == "EAP") {
-    if (is.null(mod$options$quadpts)) {
+    if (is.null(mod$quadpts)) {
       rule <- fastGHQuad::gaussHermiteData(61)
       points <- rule$x
       weights <- rule$w
       points <- points * sqrt(2)
       weights <- weights / sqrt(pi)
     } else {
-      points <- mod$options$quadpts$points
-      weights <- mod$options$quadpts$weights
+      points <- mod$quadpts$points
+      weights <- mod$quadpts$weights
     }
 
     M <- nrow(mod$itempar)
